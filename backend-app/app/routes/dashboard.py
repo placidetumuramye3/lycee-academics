@@ -201,11 +201,11 @@ def dashboard():
 
         recent_students = User.query.filter_by(role="student").order_by(User.id.desc()).limit(5).all()
         recent_students_html = "".join(
-            f"<li><span class='admin-avatar' aria-hidden='true'>{escape((student.full_name or '?')[:1].upper())}</span>"
-            f"<div><strong>{escape(student.full_name)}</strong>"
-            f"<small>{escape(student.class_name or 'Unassigned class')}</small></div></li>"
-            for student in recent_students
-        ) or "<li class='admin-empty'>No students registered yet.</li>"
+          f"<tr><td><strong>{escape(student.full_name or 'Unnamed student')}</strong></td>"
+          f"<td>#{student.id}</td><td>{escape(student.class_name or 'Unassigned')}</td>"
+          f"<td>{escape(student.trade or 'Not specified')}</td></tr>"
+          for student in recent_students
+        ) or "<tr><td class='admin-empty' colspan='4'>No students registered yet.</td></tr>"
         calendar_html = _admin_month_calendar(today, event_days)
         events_ring_svg = _admin_ring_svg(events_ring, "#ff4c61")
         admissions_ring_svg = _admin_ring_svg(admissions_ring, "#8b5cf6")
@@ -279,15 +279,38 @@ def dashboard():
 [data-theme="dark"] .admin-quick a i{background:rgba(255,255,255,.08)}
 @media(max-width:1100px){.admin-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-mid,.admin-bottom{grid-template-columns:1fr}.admin-quick{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:600px){.admin-kpis,.admin-donuts,.admin-quick{grid-template-columns:1fr}.admin-kpi{min-height:98px}.admin-chart{height:190px}}
+.admin-dash{--ad-green:#169b72;--ad-orange:#e59b52;--ad-blue:#468f85;--ad-soft:#f2f7f4;gap:14px}
+.admin-dash-heading{padding:22px 24px;border-radius:12px;background:linear-gradient(110deg,#e9c18e 0%,#f2e7d5 45%,#6e9f87 100%);align-items:center}
+.admin-dash-heading h1{font-size:1.35rem;font-weight:750;color:#183c34;margin:5px 0}
+.admin-dash-heading p{color:#36594e;font-size:.82rem}
+.admin-dash-heading .pill{background:rgba(255,255,255,.55);color:#36594e}
+.admin-dash-heading .btn{background:#fff;color:#345d50;border:0}
+.admin-kpis{gap:10px}
+.admin-kpi{min-height:90px;padding:13px 15px;border-radius:12px;box-shadow:none}
+.admin-kpi-purple{background:#fff1e8;color:#654a39}.admin-kpi-blue{background:#e8f4ef;color:#245a4a}
+.admin-kpi-white{background:var(--card);border-color:var(--border)}
+.admin-kpi-icon{width:34px;height:34px;border-radius:10px;background:rgba(255,255,255,.72);color:#178867}
+.admin-kpi-purple .admin-kpi-icon{color:#d79054}.admin-kpi-blue .admin-kpi-icon{color:#358c72}
+.admin-card{border-radius:12px;padding:15px;box-shadow:none}
+.admin-card-head h2{font-size:.92rem}
+.admin-bottom{grid-template-columns:minmax(0,1.15fr) minmax(160px,.55fr) minmax(0,1fr)}
+.admin-academic-table{width:100%;border-collapse:collapse;min-width:500px}
+.admin-academic-table th{padding:9px 10px;text-align:left;color:var(--muted);font-size:.66rem;font-weight:750;border-bottom:1px solid var(--border)}
+.admin-academic-table td{padding:10px;border-bottom:1px solid var(--border);font-size:.75rem}
+.admin-academic-table tr:last-child td{border-bottom:0}
+.admin-academic-table td:first-child strong{font-weight:750}
+.admin-academic-table-wrap{overflow-x:auto}
+@media(max-width:900px){.admin-bottom{grid-template-columns:1fr}.admin-dash-heading{align-items:flex-start}}
+@media(max-width:600px){.admin-dash-heading{padding:17px}.admin-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-kpi{min-width:0;padding:11px}.admin-kpi-value{font-size:1.45rem}}
 </style>
 <div class="admin-dash">
   <div class="admin-dash-heading">
     <div>
-      <span class="pill">SCHOOL OVERVIEW</span>
-      <h1>Welcome back, <span class="accent">{{ current_user.full_name }}</span></h1>
-      <p>Live school metrics from records currently stored in the database.</p>
+      <span class="pill">{{ month_label }} · SCHOOL OVERVIEW</span>
+      <h1>Overall Student Performance Dashboard</h1>
+      <p>Attendance, enrollment, and school activity at a glance.</p>
     </div>
-    <a class="btn btn-accent" href="/admin"><i class="bi bi-gear me-1"></i> Admin Center</a>
+    <a class="btn btn-accent" href="/admin"><i class="bi bi-arrow-up-right me-1"></i> Get Access</a>
   </div>
 
   <section class="admin-kpis" aria-label="Key metrics">
@@ -376,12 +399,17 @@ def dashboard():
     <section class="admin-card">
       <div class="admin-card-head">
         <div>
-          <h2>Recent Students</h2>
-          <p>Latest student accounts.</p>
+          <h2>Recently Registered Students</h2>
+          <p>Latest student records by class and trade.</p>
         </div>
         <a href="/students" class="btn btn-sm btn-outline-success">View all</a>
       </div>
-      <ul class="admin-recent-list">{{ recent_students_html|safe }}</ul>
+      <div class="admin-academic-table-wrap">
+        <table class="admin-academic-table">
+          <thead><tr><th>Name</th><th>Student ID</th><th>Class</th><th>Trade</th></tr></thead>
+          <tbody>{{ recent_students_html|safe }}</tbody>
+        </table>
+      </div>
     </section>
   </div>
 
@@ -397,6 +425,7 @@ def dashboard():
       <a href="/grades"><i class="bi bi-journal-text"></i><span>Report Cards</span></a>
       <a href="/fees"><i class="bi bi-cash-stack"></i><span>Fees</span></a>
       <a href="/timetable"><i class="bi bi-calendar3"></i><span>Timetable</span></a>
+      <a href="/school-structure"><i class="bi bi-diagram-3"></i><span>School Structure</span></a>
     </div>
   </section>
 </div>

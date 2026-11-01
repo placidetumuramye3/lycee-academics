@@ -4,21 +4,26 @@ from app.models.academic_structure import School, Department, Trade, SchoolClass
 from app.models.enrollment import AcademicEnrollment
 from app.models.user import User
 from app.extensions import db
+from app.utils.constants import (
+    CLASS_DEPARTMENT,
+    CLASS_TRADE_LEVEL,
+    LEGACY_CLASS_ALIASES,
+    SCHOOL_STRUCTURE,
+)
 
 SCHOOL_NAME = "Lycée de Muhura / Lycée Saint Alexandre Sauli"
 STRUCTURE = {
-    "ICT AND MULTIMEDIA": {
-        "SOFTWARE DEVELOPMENT": ["L3 SOFTWARE DEVELOPMENT", "L4 SOFTWARE DEVELOPMENT A", "L4 SOFTWARE DEVELOPMENT B", "L5 SOFTWARE DEVELOPMENT"],
-        "NETWORKING AND INTERNET TECHNOLOGY": ["L3 NETWORKING AND INTERNET TECHNOLOGY", "L4 NETWORKING AND INTERNET TECHNOLOGY A", "L4 NETWORKING AND INTERNET TECHNOLOGY B", "L5 NETWORKING AND INTERNET TECHNOLOGY"],
-        "COMPUTER SYSTEM AND ARCHITECTURE": ["L3 COMPUTER SYSTEM AND ARCHITECTURE", "L4 COMPUTER SYSTEM AND ARCHITECTURE", "L5 COMPUTER SYSTEM AND ARCHITECTURE"],
-    },
-    "FASHION AND DESIGN": {
-        "FASHION AND DESIGN": ["L3 FASHION AND DESIGN", "L4 FASHION AND DESIGN", "L5 FASHION AND DESIGN"],
-    },
-    "PROFESSIONAL ACCOUNTANT": {
-        "PROFESSIONAL ACCOUNTANT": ["S4 ACCOUNTANT A", "S4 ACCOUNTANT B", "S5 ACCOUNTANT", "S6 ACCOUNTANT"],
-    },
+    department.upper(): {
+        trade.upper(): [class_name.upper() for levels in level_map.values() for class_name in levels]
+        for trade, level_map in trade_map.items()
+    }
+    for department, trade_map in SCHOOL_STRUCTURE.items()
 }
+LEGACY_CLASS_ALIASES_UPPER = {
+    legacy.upper(): canonical.upper()
+    for legacy, canonical in LEGACY_CLASS_ALIASES.items()
+}
+CANONICAL_CLASS_NAMES_UPPER = {name.upper(): name for name in CLASS_TRADE_LEVEL}
 
 
 def upgrade(connection):
@@ -53,9 +58,9 @@ def seed_and_backfill():
             for class_name in class_names:
                 level = class_name.split(" ", 1)[0]
                 section = None
-                if class_name.endswith(" A") or " A" in class_name:
+                if class_name.endswith(" A"):
                     section = "A"
-                elif class_name.endswith(" B") or " B" in class_name:
+                elif class_name.endswith(" B"):
                     section = "B"
                 cls = SchoolClass.query.filter_by(trade_id=trade.id, name=class_name).first()
                 if not cls:
@@ -63,6 +68,40 @@ def seed_and_backfill():
                                       code=f"{dept.id}-{trade.id}-{class_name}")
                     db.session.add(cls); db.session.flush()
                 classes[class_name.strip().upper()] = (dept, trade, cls)
+
+    for legacy_name, canonical_upper in LEGACY_CLASS_ALIASES_UPPER.items():
+        canonical_name = CANONICAL_CLASS_NAMES_UPPER[canonical_upper]
+        trade_name, level = CLASS_TRADE_LEVEL[canonical_name]
+        department_name = CLASS_DEPARTMENT[canonical_name]
+        values = {"class_name": canonical_name}
+        for column_name, value in (
+            ("department", department_name),
+            ("trade", trade_name),
+            ("level", level),
+        ):
+            if column_name in User.__table__.c:
+                values[column_name] = value
+        if legacy_name.endswith((" A", " B")) and "class_section" in User.__table__.c:
+            section = legacy_name[-1]
+            db.session.execute(
+                User.__table__.update()
+                .where(
+                    db.func.lower(User.__table__.c.class_name) == legacy_name.casefold(),
+                    User.__table__.c.class_section.is_(None),
+                )
+                .values(class_section=section)
+            )
+        for table in db.metadata.tables.values():
+            class_column = table.c.get("class_name")
+            if class_column is None:
+                continue
+            update_values = {"class_name": canonical_name}
+            update_values.update({name: value for name, value in values.items() if name in table.c})
+            db.session.execute(
+                table.update()
+                .where(db.func.lower(class_column) == legacy_name.casefold())
+                .values(**update_values)
+            )
 
     current_year_name = None
     rows = User.query.filter_by(role="student").all()
@@ -72,12 +111,24 @@ def seed_and_backfill():
             current_year_name = year_name
         class_candidates = [student.class_name, student.class_section]
         label = next((x.strip().upper() for x in class_candidates if x and x.strip()), None)
+        label = LEGACY_CLASS_ALIASES_UPPER.get(label, label)
         if label not in classes:
             # Some legacy records store only level + class section.
             legacy = " ".join(x for x in [student.level, student.class_section] if x).strip().upper()
             label = legacy if legacy in classes else label
         if not label or label not in classes:
             continue
+        canonical_name = CANONICAL_CLASS_NAMES_UPPER.get(label)
+        if canonical_name:
+            dept, trade, cls = classes[label]
+            student.class_name = canonical_name
+            student.department = CLASS_DEPARTMENT[canonical_name]
+            student.trade = CLASS_TRADE_LEVEL[canonical_name][0]
+            student.level = CLASS_TRADE_LEVEL[canonical_name][1]
+            if not student.class_section and class_candidates[0]:
+                legacy_name = class_candidates[0].strip().upper()
+                if legacy_name.endswith((" A", " B")):
+                    student.class_section = legacy_name[-1]
         if not year_name:
             year_name = current_year_name or "UNSPECIFIED"
         year = AcademicYear.query.filter_by(name=year_name).first()

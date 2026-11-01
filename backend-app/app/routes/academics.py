@@ -12,12 +12,13 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from app.extensions import db
-from app.models import User, Attendance, PendingCard, FeeTransaction, Book, DisciplineCase, SchoolMessage, Grade, TimetableEntry, DayScheduleEntry, Setting, AcademicSubject, SyllabusCoverage, LessonPlan, ReportCardApproval
+from app.models import User, Attendance, PendingCard, FeeTransaction, Book, DisciplineCase, SchoolMessage, Grade, TimetableEntry, DayScheduleEntry, Setting, AcademicSubject, SyllabusCoverage, LessonPlan, ReportCardApproval, School, Department, Trade, SchoolClass, AcademicYear, AcademicEnrollment
 from app.utils.constants import *
 from app.utils.decorators import role_required
 from app.utils.helpers import get_setting, set_setting, attendance_for_student, linked_children, teacher_assignments, teacher_assigned_classes, get_school_logo_static_url
 from app.utils.rendering import page
 from app.utils.decorators import permission_for
+from app.services.academic_structure import canonical_class_name
 
 def timetable():
     if request.method == "POST" and current_user.role not in {"master_admin", "secretary", "patron", "matron"}:
@@ -156,6 +157,179 @@ def assigned_subjects_for_teacher(teacher):
     return teacher_assignments(teacher)
 
 
+def school_structure():
+    school = School.query.filter_by(code="LYCEE-MUHURA", is_active=True).first()
+    if not school:
+        return page("School Structure", "<section class='panel'><h1>School Structure</h1><p class='muted'>The school structure has not been configured yet.</p></section>", "teacher")
+
+    years = AcademicYear.query.order_by(AcademicYear.name.desc()).all()
+    selected_year_id = request.args.get("year_id", type=int)
+    selected_year = next((year for year in years if year.id == selected_year_id), None)
+    if selected_year is None:
+        selected_year = next((year for year in years if year.is_current), years[0] if years else None)
+
+    class_records = (
+        SchoolClass.query.join(Trade).join(Department)
+        .filter(Department.school_id == school.id, SchoolClass.is_active.is_(True))
+        .all()
+    )
+    if current_user.role == "teacher":
+        assigned_names = {name.strip().casefold() for name in teacher_assigned_classes(current_user) if name}
+        class_records = [item for item in class_records if item.name.strip().casefold() in assigned_names]
+
+    department_order = {name.casefold(): index for index, name in enumerate(SCHOOL_STRUCTURE)}
+    trade_order = {
+        trade_name.casefold(): index
+        for trade_map in SCHOOL_STRUCTURE.values()
+        for index, trade_name in enumerate(trade_map)
+    }
+    class_order = {
+        class_name.casefold(): index
+        for trade_map in SCHOOL_STRUCTURE.values()
+        for levels in trade_map.values()
+        for class_names in levels.values()
+        for index, class_name in enumerate(class_names)
+    }
+    level_order = {level: index for index, level in enumerate(("L3", "L4", "L5", "S4", "S5", "S6"))}
+    class_records.sort(key=lambda item: (
+        department_order.get(item.trade.department.name.casefold(), 99),
+        trade_order.get(item.trade.name.casefold(), 99),
+        level_order.get(item.level, 99),
+        class_order.get(item.name.casefold(), 99),
+    ))
+
+    enrollments = AcademicEnrollment.query.join(User).filter(
+        AcademicEnrollment.status == "active",
+        User.role == "student",
+        db.or_(User.is_active_account.is_(True), User.is_active_account.is_(None)),
+    )
+    if selected_year:
+        enrollments = enrollments.filter(AcademicEnrollment.academic_year_id == selected_year.id)
+    else:
+        enrollments = enrollments.filter(db.false())
+    student_class_ids = {
+        enrollment.student_id: enrollment.class_id
+        for enrollment in enrollments.all()
+    }
+    class_by_name = {item.name.casefold(): item.id for item in class_records}
+    class_by_name.update({
+        alias.casefold(): class_by_name[canonical.casefold()]
+        for alias, canonical in LEGACY_CLASS_ALIASES.items()
+        if canonical.casefold() in class_by_name
+    })
+    active_students = User.query.filter(
+        User.role == "student",
+        db.or_(User.is_active_account.is_(True), User.is_active_account.is_(None)),
+    ).order_by(User.class_name, User.full_name).all()
+    students_by_class = {item.id: [] for item in class_records}
+    for student in active_students:
+        class_id = student_class_ids.get(student.id)
+        if class_id is not None:
+            if class_id not in students_by_class:
+                continue
+        else:
+            if selected_year and student.academic_year != selected_year.name:
+                continue
+            canonical_name = canonical_class_name(student.class_name)
+            class_id = class_by_name.get(canonical_name.casefold()) if canonical_name else None
+        if class_id in students_by_class:
+            students_by_class[class_id].append(student)
+
+    selected_class_id = request.args.get("class_id", type=int)
+    selected_class = next((item for item in class_records if item.id == selected_class_id), None)
+    if selected_class_id and selected_class is None:
+        if current_user.role == "teacher" and db.session.get(SchoolClass, selected_class_id):
+            abort(403)
+        abort(404)
+
+    class_rows = {}
+    for department in DEPARTMENTS:
+        for trade_name in SCHOOL_STRUCTURE[department]:
+            records = [item for item in class_records if item.trade.name.casefold() == trade_name.casefold()]
+            if records:
+                class_rows[(department, trade_name)] = records
+
+    sections = []
+    for department in DEPARTMENTS:
+        department_trades = [name for name in SCHOOL_STRUCTURE[department] if (department, name) in class_rows]
+        if not department_trades:
+            continue
+        trades_html = []
+        for trade_name in department_trades:
+            records = class_rows[(department, trade_name)]
+            items = []
+            for record in records:
+                display_name = canonical_class_name(record.name) or record.name
+                href = url_for("school_structure", class_id=record.id, year_id=selected_year.id if selected_year else None)
+                items.append(
+                    f"<a class='structure-class' href='{href}'><span><strong>{escape(display_name)}</strong>"
+                    f"<small>{escape(record.level)}{f' · Section {escape(record.section)}' if record.section else ''}</small></span>"
+                    f"<b>{len(students_by_class[record.id])}</b></a>"
+                )
+            trades_html.append(
+                f"<section class='structure-trade'><h3>{escape(trade_name)}</h3>"
+                f"<div class='structure-class-list'>{''.join(items)}</div></section>"
+            )
+        sections.append(
+            f"<section class='structure-department'><div class='structure-department-heading'>"
+            f"<span>DEPARTMENT</span><h2>{escape(department)}</h2></div>"
+            f"<div class='structure-trades'>{''.join(trades_html)}</div></section>"
+        )
+
+    roster = ""
+    if selected_class:
+        selected_name = canonical_class_name(selected_class.name) or selected_class.name
+        selected_trade, selected_level = CLASS_TRADE_LEVEL[selected_name]
+        roster_rows = "".join(
+            f"<tr><td><a href='{url_for('student_profile_by_id', student_id=student.id)}'>{escape(student.full_name)}</a></td>"
+            f"<td>{escape(student.sdms_code or 'Not assigned')}</td><td>{escape(student.class_section or '—')}</td>"
+            f"<td>{escape(student.academic_year or selected_year.name if selected_year else student.academic_year or '—')}</td></tr>"
+            for student in students_by_class[selected_class.id]
+        ) or "<tr><td colspan='4' class='muted'>No active students are assigned to this class for the selected year.</td></tr>"
+        roster = (
+            f"<section class='panel structure-roster'><div class='d-flex justify-content-between align-items-start gap-3 flex-wrap'>"
+            f"<div><span class='pill'>{escape(CLASS_DEPARTMENT[selected_name])}</span><h2>{escape(selected_name)}</h2>"
+            f"<p class='muted'>{escape(selected_trade)} · {escape(selected_level)} · "
+            f"{escape(selected_year.name if selected_year else 'No academic year selected')}</p></div>"
+            f"<a class='btn btn-outline-secondary' href='{url_for('school_structure', year_id=selected_year.id if selected_year else None)}'>All classes</a></div>"
+            f"<div class='table-responsive'><table class='table'><thead><tr><th>Student</th><th>Admission number</th><th>Section</th><th>Academic year</th></tr></thead>"
+            f"<tbody>{roster_rows}</tbody></table></div></section>"
+        )
+
+    year_options = "".join(
+        f"<option value='{year.id}'{' selected' if selected_year and year.id == selected_year.id else ''}>{escape(year.name)}{' · Current' if year.is_current else ''}</option>"
+        for year in years
+    )
+    body = f"""<style>
+.school-structure{{display:grid;gap:12px}}
+.structure-summary{{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}}
+.structure-summary h1{{margin:6px 0;font-size:1.55rem}}
+.structure-summary p{{margin:0;color:var(--muted)}}
+.structure-summary form{{display:flex;align-items:center;gap:8px}}
+.structure-summary select{{min-width:170px}}
+.structure-counts{{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}}
+.structure-counts span{{padding:5px 9px;border-radius:6px;background:var(--page);color:var(--muted);font-size:.72rem;font-weight:700}}
+.structure-department{{padding:17px 0;border-top:1px solid var(--border)}}
+.structure-department-heading span{{color:var(--green-700);font-size:.65rem;font-weight:800}}
+.structure-department-heading h2{{margin:3px 0 15px;font-size:1.1rem}}
+.structure-trades{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:22px}}
+.structure-trade h3{{margin:0 0 8px;font-size:.86rem}}
+.structure-class-list{{border-top:1px solid var(--border)}}
+.structure-class{{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 2px;border-bottom:1px solid var(--border);color:var(--text)}}
+.structure-class:hover{{color:var(--green-800)}}
+.structure-class strong,.structure-class small{{display:block}}
+.structure-class strong{{font-size:.76rem}}
+.structure-class small{{margin-top:2px;color:var(--muted);font-size:.66rem}}
+.structure-class>b{{min-width:30px;padding:3px 7px;border-radius:5px;background:var(--page);text-align:center;font-size:.72rem}}
+.structure-roster h2{{margin:7px 0;font-size:1.15rem}}
+@media(max-width:600px){{.structure-summary form{{width:100%}}.structure-summary select{{flex:1;min-width:0}}.structure-trades{{grid-template-columns:1fr}}}}
+</style><main class='school-structure'><section class='panel structure-summary'><div><span class='pill'>ACADEMIC ORGANIZATION</span><h1>School Structure</h1><p>Browse each department, trade, level, and class register.</p><div class='structure-counts'><span>{len(DEPARTMENTS)} departments</span><span>{len(TRADES)} trades</span><span>{len(class_records)} visible classes</span></div></div>"""
+    body += f"<form method='get' aria-label='Academic year'><label for='structure-year'>Academic year</label><select class='form-select' id='structure-year' name='year_id' onchange='this.form.submit()'><option value=''>All recorded placements</option>{year_options}</select></form></section>"
+    body += "".join(sections) or "<section class='panel'><p class='muted mb-0'>No classes are available for your account.</p></section>"
+    body += roster + "</main>"
+    return page("School Structure", body, "teacher")
+
+
 def academic_management():
     managers = current_user.role in {"master_admin", "head_teacher"}
     if request.method == "POST":
@@ -277,6 +451,7 @@ def academic_management():
     body = f"""<section class='panel'><h1>Academic <span class='accent'>Management</span></h1><p class='muted'>Manage program subjects, track syllabus coverage, review lesson plans, and monitor teaching and learning progress.</p></section>{catalog_form}{teacher_forms}
 <section class='panel'><h2>Teaching and Learning Progress</h2><div class='table-responsive'><table class='table align-middle'><thead><tr><th>Trade</th><th>Level</th><th>Class</th><th>Subject</th><th>Teacher</th><th>Syllabus Coverage</th><th>Lesson Plans</th></tr></thead><tbody>{''.join(subject_rows) or '<tr><td colspan="7" class="muted">No program subjects have been assigned yet.</td></tr>'}</tbody></table></div></section>
 <section class='panel'><h2>{'Teachersâ€™ Lesson Plans' if managers else 'My Lesson Plans'}</h2><div class='table-responsive'><table class='table align-middle'><thead><tr><th>Class</th><th>Subject</th><th>Teacher</th><th>Date</th><th>Topic and Objectives</th><th>Status</th><th>{'Review' if managers else 'Feedback'}</th></tr></thead><tbody>{''.join(plan_rows) or '<tr><td colspan="7" class="muted">No lesson plans have been submitted.</td></tr>'}</tbody></table></div></section>"""
+    body = "<section class='panel d-flex justify-content-between align-items-center gap-3 flex-wrap'><div><h2 class='mb-1'>School Structure</h2><p class='muted mb-0'>Browse departments, trades, class rosters, and academic-year placements.</p></div><a class='btn btn-outline-primary' href='/school-structure'><i class='bi bi-diagram-3 me-1'></i> View School Structure</a></section>" + body
     return page("Academic Management", body, "teacher")
 
 
@@ -1059,6 +1234,7 @@ def report_card(student_id, year_key):
     return page("Learner Assessment Report", report_html, "student")
 
 def register_routes(app):
+    app.add_url_rule('/school-structure', endpoint='school_structure', view_func=permission_for('school_structure')(school_structure), methods=['GET'])
     app.add_url_rule('/academic-management', endpoint='academic_management', view_func=permission_for('academic_management')(academic_management), methods=['GET', 'POST'])
     app.add_url_rule('/timetable', endpoint='timetable', view_func=permission_for('timetable')(timetable), methods=['GET', 'POST'])
     app.add_url_rule('/day-schedule', endpoint='day_schedule', view_func=permission_for('day_schedule')(day_schedule), methods=['GET', 'POST'])
