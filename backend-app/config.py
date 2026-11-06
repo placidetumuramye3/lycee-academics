@@ -5,7 +5,10 @@ load_dotenv()
 
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "lycee-muhura-secure-key-2026")
-    SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", "sqlite:///lyceedemuhura.db")
+    # An empty DATABASE_URL (as left in .env for the local setup) must not
+    # override the SQLite default: dotenv still defines the variable.
+    SQLALCHEMY_DATABASE_URI = (os.environ.get("DATABASE_URL") or "").strip() \
+        or "sqlite:///lyceedemuhura.db"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # Supabase and other hosted PostgreSQL services can close idle pooled
     # connections. Check a connection before reuse and periodically recycle it.
@@ -17,6 +20,9 @@ class Config:
     PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
     RFID_DEVICE_TOKEN = os.environ.get("RFID_DEVICE_TOKEN", "")
     RFID_DEVICE_CLASS = os.environ.get("RFID_DEVICE_CLASS", "").strip()
+    # Optional: the full URL the ESP32 polls, used by the RFID scanner help page
+    # so the configured value can be checked against the firmware.
+    RFID_STATUS_URL = os.environ.get("RFID_STATUS_URL", "").strip()
     ROOM_CAPACITY_LIMITS = os.environ.get("ROOM_CAPACITY_LIMITS", "{}")
     MS_GRAPH_TENANT_ID = os.environ.get("MS_GRAPH_TENANT_ID", "")
     MS_GRAPH_CLIENT_ID = os.environ.get("MS_GRAPH_CLIENT_ID", "")

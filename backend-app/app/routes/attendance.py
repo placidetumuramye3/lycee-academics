@@ -47,14 +47,28 @@ def _student_level(student):
     return (student.level or inferred_level or "").strip()
 
 
+def _attendance_placement(student):
+    """Return the registered department, trade, level, class, and section."""
+    class_name = (student.class_name or "").strip()
+    inferred_trade, inferred_level = CLASS_TRADE_LEVEL.get(class_name, (None, None))
+    trade = (student.trade or inferred_trade or "").strip()
+    department = (student.department or "").strip()
+    if not department:
+        department = next(
+            (name for name, trade_map in SCHOOL_STRUCTURE.items() if trade in trade_map), "")
+    return (
+        department,
+        trade,
+        (student.level or inferred_level or "").strip(),
+        class_name,
+        (student.class_section or "").strip(),
+    )
+
+
 def attendance():
     if current_user.role not in {"parent", "student"}:
         reconcile_daily_absences()
         db.session.commit()
-
-    selected_level_group = request.args.get("level_group", "ALL").strip().upper()
-    if selected_level_group != "ALL" and selected_level_group not in ATTENDANCE_LEVEL_GROUPS:
-        selected_level_group = "ALL"
 
     teacher_class_keys = {
         name.strip().casefold() for name in teacher_assigned_classes(current_user) if name and name.strip()
@@ -83,52 +97,75 @@ def attendance():
         students_query = students_query.filter(User.id.in_(child_ids))
     scoped_students = students_query.order_by(User.full_name).all()
 
-    if selected_level_group != "ALL":
+    selected_level_group = request.args.get("level_group", "ALL").strip().upper()
+    if selected_level_group in ATTENDANCE_LEVEL_GROUPS:
         selected_levels = {level.casefold() for level in ATTENDANCE_LEVEL_GROUPS[selected_level_group]}
         scoped_students = [
             student for student in scoped_students
             if _student_level(student).casefold() in selected_levels
         ]
 
+    # Filter options are limited to the registered students this user may see,
+    # so a trade never offers a level or class that has no student in it.
     filter_fields = (
+<<<<<<< Updated upstream
         ("department", "Department", lambda student: (student.department or student.trade or "").strip()),
         ("trade", "Trade", lambda student: (student.trade or "").strip()),
         ("level", "Level", _student_level),
         ("class_name", "Class", lambda student: (student.class_name or "").strip()),
+=======
+        ("department", "Department", 0),
+        ("trade", "Trade", 1),
+        ("level", "Level", 2),
+        ("class_name", "Class", 3),
+        ("class_section", "Class Section", 4),
+>>>>>>> Stashed changes
     )
-    no_value = "__not_specified__"
+    placements = {student.id: _attendance_placement(student) for student in scoped_students}
+    raw_filters = {field_name: request.args.get(field_name, "").strip() for field_name, _label, _index in filter_fields}
     selected_filters = {}
+    possible = list(scoped_students)
     filter_selects = []
-    for field_name, label, value_for in filter_fields:
-        values = {value_for(student) for student in scoped_students}
-        has_unspecified = "" in values
-        values.discard("")
-        raw_value = request.args.get(field_name, "").strip()
-        valid_values = values | ({no_value} if has_unspecified else set())
-        selected_value = raw_value if raw_value in valid_values else ""
+    for field_name, label, index in filter_fields:
+        candidates = {
+            placements[student.id][index] for student in possible
+            if all(placements[student.id][parent_index] == selected_filters[parent_name]
+                   for parent_name, _parent_label, parent_index in filter_fields[:index]
+                   if selected_filters.get(parent_name))
+        }
+        candidates.discard("")
+        selected_value = raw_filters[field_name] if raw_filters[field_name] in candidates else ""
         selected_filters[field_name] = selected_value
-        options = [f"<option value=''{ ' selected' if not selected_value else ''}>All {escape(label.lower())}s</option>"]
-        if has_unspecified:
+        if selected_value:
+            possible = [student for student in possible
+                        if placements[student.id][index] == selected_value]
+        previous_label = filter_fields[index - 1][1] if index else ""
+        prompt = "All departments" if not index else (
+            f"Choose {previous_label.lower()} first..." if not selected_filters[filter_fields[index - 1][0]]
+            else "All sections" if field_name == "class_section"
+            else f"All classes" if field_name == "class_name"
+            else f"All {label.lower()}s"
+        )
+        options = []
+        if index == 0 or selected_filters[filter_fields[index - 1][0]]:
             options.append(
-                f"<option value='{no_value}'{' selected' if selected_value == no_value else ''}>Not specified</option>"
-            )
+                f"<option value=''{' selected' if not selected_value else ''}>{escape(prompt)}</option>")
+        else:
+            options.append(f"<option value=''>{escape(prompt)}</option>")
         options.extend(
-            f"<option value='{escape(value)}'{' selected' if selected_value == value else ''}>{escape(value)}</option>"
-            for value in sorted(values, key=str.casefold)
+            f"<option value='{escape(value)}'{' selected' if selected_value == value else ''}>"
+            f"{escape(f'{label} {value}' if field_name == 'class_section' and value.isalpha() else value)}</option>"
+            for value in sorted(candidates, key=str.casefold)
         )
         filter_selects.append(
-            f"<div class='col-md-2'><label class='form-label' for='attendance-{field_name}'>{escape(label)}</label>"
-            f"<select class='form-select' id='attendance-{field_name}' name='{field_name}'>{''.join(options)}</select></div>"
+            f"<div class='attendance-filter-field'><label class='form-label' for='attendance-{field_name}'>{escape(label)}</label>"
+            f"<select class='form-select attendance-filter-select' id='attendance-{field_name}' "
+            f"name='{field_name}' data-filter-level='{index}'"
+            f"{'' if index == 0 or selected_filters[filter_fields[index - 1][0]] else ' disabled'}>"
+            f"{''.join(options)}</select></div>"
         )
 
-    scoped_students = [
-        student for student in scoped_students
-        if all(
-            not selected_filters[field_name]
-            or (no_value if not value_for(student) else value_for(student)) == selected_filters[field_name]
-            for field_name, _label, value_for in filter_fields
-        )
-    ]
+    scoped_students = possible
     scoped_student_ids = {student.id for student in scoped_students}
     q = [record for record in q if record.student_id in scoped_student_ids]
     today = datetime.date.today().isoformat()
@@ -137,24 +174,23 @@ def attendance():
     absent_records = [record for record in today_records if record.status == "Absent"]
     rfid_records = [record for record in today_records if record.source == "RFID"]
 
-    level_group_labels = {
-        "ALL": "All levels",
-        "L3-S4": "L3 and S4 (all departments and classes)",
-        "L4-S5": "L4 and S5 (all departments and classes)",
-        "L5-S6": "L5 and S6 (all departments and classes)",
-    }
-    level_group_options = "".join(
-        f"<option value='{value}'{' selected' if selected_level_group == value else ''}>{escape(label)}</option>"
-        for value, label in level_group_labels.items()
-    )
+
     attendance_filter = (
-        "<form method='get' action='/attendance' class='row g-2 align-items-end mb-3'>"
-        "<div class='col-md-2'><label class='form-label' for='attendance-level-group'>Level group</label>"
-        f"<select class='form-select' id='attendance-level-group' name='level_group'>{level_group_options}</select></div>"
+        "<style>[data-attendance-filter] { row-gap: .75rem; }"
+        "[data-attendance-filter] .attendance-filter-field { flex: 1 1 150px; min-width: 0; }"
+        "</style>"
+        "<form method='get' action='/attendance' class='row g-2 align-items-end mb-3' "
+        "data-attendance-filter data-placement=\""
+        f"{escape(json.dumps(placements))}\">"
         f"{''.join(filter_selects)}"
-        "<div class='col-auto'><button class='btn btn-accent' type='submit'>View Attendance</button></div>"
-        "<div class='col-auto'><a class='btn btn-outline-secondary' href='/attendance'>Clear filter</a></div></form>"
+        "<div class='col-auto'><button class='btn btn-accent' type='submit' id='attendance-view-button'>"
+        "View Attendance</button></div>"
+        "<div class='col-auto'><a class='btn btn-outline-secondary' href='/attendance'>Clear filter</a></div>"
+        "</form><script src='/static/js/attendance-filter.js' defer></script>"
     )
+    scope_summary = " \u203a ".join(
+        escape(value) for value in selected_filters.values() if value
+    ) or "all departments, trades, levels, classes, and sections"
 
     status_by_student = {}
     for record in today_records:
@@ -325,11 +361,16 @@ def attendance():
             f"<td>{status_cell}</td><td>{escape(_scan_datetime(a.day, a.arrival_time))}</td>"
             f"<td>{escape(_scan_datetime(a.day, a.afternoon_time))}</td><td>{escape(a.source or '-')}</td></tr>"
         )
+<<<<<<< Updated upstream
     body = f"""<section class="panel"><h1>Attendance <span class="accent">Register</span></h1><p class="muted">Attendance is recorded automatically by RFID scans using the server clock. Scans within the configured Present grace after the allowed time ends are Present; later scans through 15 minutes after are Late. Students with no scan by the end of the 15-minute grace period are marked Absent when the ESP32 polls, staff open this page, or the scheduled attendance reconciliation command runs. Scans after the grace period are denied; the separately configured afternoon scan window remains available. Attendance statuses and times are read-only here. Class attendance updates are sent to assigned teachers, matron, patron, discipline staff, and school leadership.</p><div class="grid mb-4"><div class="stat"><div class="stat-value">{len(rfid_records)}</div><div class="stat-label">RFID Scans Today</div></div><div class="stat"><div class="stat-value">{len(late_records)}</div><div class="stat-label">Late Students Today</div></div><div class="stat"><div class="stat-value">{len(absent_records)}</div><div class="stat-label">Absences Today</div></div></div></section>{teacher_roster_section}<section class="panel"><h2>Attendance Totals by Department / Trade and Class</h2><p class="muted">Showing {escape(level_group_labels[selected_level_group])} for {today}. Totals follow the registered student structure: Trade / Department → Level → Class. Students without a recorded status are counted as Not marked.</p>{attendance_filter}<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Department / Trade</th><th>Level</th><th>Class</th><th>Enrolled</th><th>Present</th><th>Late</th><th>Absent</th><th>Permission</th><th>Not marked</th></tr></thead><tbody>{''.join(attendance_total_rows) or '<tr><td colspan="9" class="muted">No students are registered in this attendance scope.</td></tr>'}</tbody></table></div></section><section class="panel"><h2>Today's Attendance Details</h2><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Student</th><th>Class</th><th>Status</th><th>Morning Scan Date/Time</th><th>Afternoon Scan Date/Time</th><th>Source</th></tr></thead><tbody>{today_rows or '<tr><td colspan="6" class="muted">No attendance records recorded today.</td></tr>'}</tbody></table></div><h2 class="mt-4">Attendance History</h2><div class="table-responsive"><table class="table align-middle attendance-history"><thead><tr><th>Date</th><th>Student Name</th><th>Class</th><th>Status</th><th>Morning Scan Date/Time</th><th>Afternoon Scan Date/Time</th><th>Source</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan="7" class="muted">No attendance records found.</td></tr>'}</tbody></table></div><a class="btn btn-outline-success mt-3" href="/attendance/export" style="border-color:var(--accent);color:var(--text)">Download Attendance Excel</a></section>"""
     body = body.replace(
         "Trade / Department â†’ Level â†’ Class.",
         "Department â†’ Trade â†’ Level â†’ Class.",
     )
+=======
+    body = f"""<section class="panel"><h1>Attendance <span class="accent">Register</span></h1><p class="muted">Attendance is recorded automatically by RFID scans using the server clock. Scans within the configured Present grace after the allowed time ends are Present; later scans through 15 minutes after are Late. Students with no scan by the end of the 15-minute grace period are marked Absent when the ESP32 polls, staff open this page, or the scheduled attendance reconciliation command runs. Scans after the grace period are denied; the separately configured afternoon scan window remains available. Attendance statuses and times are read-only here. Class attendance updates are sent to assigned teachers, matron, patron, discipline staff, and school leadership.</p><div class="grid mb-4"><div class="stat"><div class="stat-value">{len(rfid_records)}</div><div class="stat-label">RFID Scans Today</div></div><div class="stat"><div class="stat-value">{len(late_records)}</div><div class="stat-label">Late Students Today</div></div><div class="stat"><div class="stat-value">{len(absent_records)}</div><div class="stat-label">Absences Today</div></div></div></section>{teacher_roster_section}<section class="panel"><h2>Attendance Totals by Department / Trade and Class</h2><p class="muted">Showing {scope_summary} for {today}. Totals follow the registered student structure: Department → Trade → Level → Class → Section. Students without a recorded status are counted as Not marked.</p>{attendance_filter}<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Department / Trade</th><th>Level</th><th>Class</th><th>Enrolled</th><th>Present</th><th>Late</th><th>Absent</th><th>Permission</th><th>Not marked</th></tr></thead><tbody>{''.join(attendance_total_rows) or '<tr><td colspan="9" class="muted">No students are registered in this attendance scope.</td></tr>'}</tbody></table></div></section><section class="panel"><h2>Today's Attendance Details</h2><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Student</th><th>Class</th><th>Status</th><th>Morning Scan Date/Time</th><th>Afternoon Scan Date/Time</th><th>Source</th></tr></thead><tbody>{today_rows or '<tr><td colspan="6" class="muted">No attendance records recorded today.</td></tr>'}</tbody></table></div><h2 class="mt-4">Attendance History</h2><div class="table-responsive"><table class="table align-middle attendance-history"><thead><tr><th>Date</th><th>Student Name</th><th>Class</th><th>Status</th><th>Morning Scan Date/Time</th><th>Afternoon Scan Date/Time</th><th>Source</th></tr></thead><tbody>{''.join(rows) or '<tr><td colspan="7" class="muted">No attendance records found.</td></tr>'}</tbody></table></div><a class="btn btn-outline-success mt-3" href="/attendance/export" style="border-color:var(--accent);color:var(--text)">Download Attendance Excel</a></section>"""
+
+>>>>>>> Stashed changes
     body = body.replace(
         "Attendance Totals by Department / Trade and Class",
         "Attendance Totals by Department, Trade, Level, Class",

@@ -75,5 +75,32 @@ with app.app_context():
         db.session.add(adm)
         db.session.commit()
 
+    # Seed relational academic hierarchy (School -> Departments -> Trades -> Classes)
+    from app.models.academic_structure import School, Department, Trade, SchoolClass
+    from app.utils.constants import SCHOOL_STRUCTURE
+    school = School.query.filter_by(name="Lycée de Muhura").first()
+    if not school:
+        school = School(name="Lycée de Muhura", code="LM")
+        db.session.add(school)
+        db.session.commit()
+    for dept_name, trades_dict in SCHOOL_STRUCTURE.items():
+        dept = Department.query.filter_by(school_id=school.id, name=dept_name).first()
+        if not dept:
+            dept = Department(school_id=school.id, name=dept_name)
+            db.session.add(dept)
+            db.session.commit()
+        for trade_name, levels_dict in trades_dict.items():
+            trade = Trade.query.filter_by(department_id=dept.id, name=trade_name).first()
+            if not trade:
+                trade = Trade(department_id=dept.id, name=trade_name)
+                db.session.add(trade)
+                db.session.commit()
+            for level_key, class_names in levels_dict.items():
+                for c_name in class_names:
+                    s_class = SchoolClass.query.filter_by(trade_id=trade.id, name=c_name).first()
+                    if not s_class:
+                        db.session.add(SchoolClass(trade_id=trade.id, name=c_name, level=level_key))
+                db.session.commit()
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

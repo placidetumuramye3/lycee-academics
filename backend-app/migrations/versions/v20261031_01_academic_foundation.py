@@ -7,17 +7,30 @@ from app.extensions import db
 
 SCHOOL_NAME = "Lycée de Muhura / Lycée Saint Alexandre Sauli"
 STRUCTURE = {
-    "ICT AND MULTIMEDIA": {
-        "SOFTWARE DEVELOPMENT": ["L3 SOFTWARE DEVELOPMENT", "L4 SOFTWARE DEVELOPMENT A", "L4 SOFTWARE DEVELOPMENT B", "L5 SOFTWARE DEVELOPMENT"],
-        "NETWORKING AND INTERNET TECHNOLOGY": ["L3 NETWORKING AND INTERNET TECHNOLOGY", "L4 NETWORKING AND INTERNET TECHNOLOGY A", "L4 NETWORKING AND INTERNET TECHNOLOGY B", "L5 NETWORKING AND INTERNET TECHNOLOGY"],
-        "COMPUTER SYSTEM AND ARCHITECTURE": ["L3 COMPUTER SYSTEM AND ARCHITECTURE", "L4 COMPUTER SYSTEM AND ARCHITECTURE", "L5 COMPUTER SYSTEM AND ARCHITECTURE"],
+    "ICT and Multimedia": {
+        "Software Development": ["L3 SOFTWARE DEVELOPMENT", "L4 SOFTWARE DEVELOPMENT A", "L4 SOFTWARE DEVELOPMENT B", "L5 SOFTWARE DEVELOPMENT"],
+        "Networking and Internet Technology": ["L3 NETWORKING AND INTERNET TECHNOLOGY", "L4 NETWORKING AND INTERNET TECHNOLOGY A", "L4 NETWORKING AND INTERNET TECHNOLOGY B", "L5 NETWORKING AND INTERNET TECHNOLOGY"],
+        "Computer System and Architecture": ["L3 COMPUTER SYSTEM AND ARCHITECTURE", "L4 COMPUTER SYSTEM AND ARCHITECTURE", "L5 COMPUTER SYSTEM AND ARCHITECTURE"],
     },
-    "FASHION AND DESIGN": {
-        "FASHION AND DESIGN": ["L3 FASHION AND DESIGN", "L4 FASHION AND DESIGN", "L5 FASHION AND DESIGN"],
+    "Fashion and Design": {
+        "Fashion and Design": ["L3 FASHION AND DESIGN", "L4 FASHION AND DESIGN", "L5 FASHION AND DESIGN"],
     },
-    "PROFESSIONAL ACCOUNTANT": {
-        "PROFESSIONAL ACCOUNTANT": ["S4 ACCOUNTANT A", "S4 ACCOUNTANT B", "S5 ACCOUNTANT", "S6 ACCOUNTANT"],
+    "Accounting": {
+        "Accounting": ["S4 ACCOUNTANT A", "S4 ACCOUNTANT B", "S5 ACCOUNTANT", "S6 ACCOUNTANT"],
     },
+}
+# Earlier releases seeded these department/trade names in upper case (or as
+# "Professional Accountant"). They are renamed - never duplicated - so existing
+# classes, modules and enrollments keep their relationships intact.
+LEGACY_NAMES = {
+    "department": {"ICT AND MULTIMEDIA": "ICT and Multimedia",
+                   "FASHION AND DESIGN": "Fashion and Design",
+                   "PROFESSIONAL ACCOUNTANT": "Accounting"},
+    "trade": {"SOFTWARE DEVELOPMENT": "Software Development",
+              "NETWORKING AND INTERNET TECHNOLOGY": "Networking and Internet Technology",
+              "COMPUTER SYSTEM AND ARCHITECTURE": "Computer System and Architecture",
+              "FASHION AND DESIGN": "Fashion and Design",
+              "PROFESSIONAL ACCOUNTANT": "Accounting"},
 }
 
 
@@ -29,7 +42,21 @@ def upgrade(connection):
     ])
 
 
+def normalize_department_trade_names():
+    """Rename legacy department/trade rows to the canonical names."""
+    for model, names in ((Department, LEGACY_NAMES["department"]),
+                         (Trade, LEGACY_NAMES["trade"])):
+        for old_name, new_name in names.items():
+            for row in model.query.filter_by(name=old_name).all():
+                scope = {"school_id": row.school_id} if model is Department \
+                    else {"department_id": row.department_id}
+                if model.query.filter_by(name=new_name, **scope).first() is None:
+                    row.name = new_name
+    db.session.flush()
+
+
 def seed_and_backfill():
+    normalize_department_trade_names()
     school = School.query.filter_by(name=SCHOOL_NAME).first()
     if not school:
         school = School(name=SCHOOL_NAME, code="LYCEE-MUHURA")

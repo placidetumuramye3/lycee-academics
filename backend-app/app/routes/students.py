@@ -21,6 +21,8 @@ from app.utils.rendering import page
 from app.utils.decorators import permission_for
 from markupsafe import escape
 from app.services.activity import log_student_activity
+from app.models.academic_structure import Department
+from app.services.academic_catalog import AcademicValidationError, validate_placement
 
 def student_profile(student_id=None):
     if current_user.role == "student":
@@ -205,12 +207,30 @@ def student_edit(student_id):
         )
 
         error = None
+        placement_error = None
+        try:
+            canonical_department, form["trade"], form["level"], form["class_name"] = validate_placement(
+                form["trade"], form["level"], form["class_name"])
+            form["department"] = form["department"] or canonical_department
+        except AcademicValidationError as validation_error:
+            placement_error = str(validation_error)
         if not form["full_name"] or len(form["full_name"]) > 160 or not form["username"] or len(form["username"]) > 80:
             error = "Enter a student name and username within the allowed lengths."
+<<<<<<< Updated upstream
         elif not form["department"] or len(form["department"]) > 100:
             error = "Enter a department of up to 100 characters."
         elif not class_matches_program:
             error = "Choose a department, trade, level, and class from the available options."
+=======
+        elif not form["department"] or len(form["department"]) > 100 or len(form["class_section"]) > 50:
+            error = "Enter a department of up to 100 characters and a section of up to 50 characters."
+        elif form["trade"] not in PROGRAM_LEVELS or form["level"] not in PROGRAM_LEVELS.get(form["trade"], []):
+            error = "Choose a valid trade and level."
+        elif not form["class_name"] or len(form["class_name"]) > 100 or not class_matches_program:
+            error = "Choose a class that matches the selected trade and level."
+        elif placement_error:
+            error = placement_error
+>>>>>>> Stashed changes
         elif class_scope_conflict:
             error = "That class name is already assigned to a different department, trade, or level."
         elif not form["academic_year"] or len(form["academic_year"]) > 9 or not valid_academic_year:
@@ -266,12 +286,20 @@ def student_edit(student_id):
         ("full_name", "Full name", "text", True), ("username", "Username", "text", True),
         ("email", "Student email", "email", False), ("phone", "Student phone", "tel", False),
         ("date_of_birth", "Date of birth", "date", True), ("academic_year", "Academic year", "text", True),
+<<<<<<< Updated upstream
         ("guardian_name", "Guardian name", "text", False),
+=======
+        ("class_section", "Class section", "text", False), ("guardian_name", "Guardian name", "text", False),
+>>>>>>> Stashed changes
         ("guardian_relationship", "Guardian relationship", "text", False),
         ("guardian_phone", "Guardian phone", "tel", False), ("address", "Home address", "text", False),
         ("rfid_uid", "RFID card UID", "text", False),
     )
+<<<<<<< Updated upstream
     controls = [render_academic_placement_fields("edit", form)]
+=======
+    controls = []
+>>>>>>> Stashed changes
     for field, label, input_type, required in fields:
         required_attr = " required" if required else ""
         controls.append(
@@ -286,8 +314,27 @@ def student_edit(student_id):
     body = (
         "<section class='panel'><h1>Edit student</h1>"
         f"<p class='muted'>Update the registered details for {escape(student.full_name)}. Changes are recorded in the student activity history.</p>"
-        "<form method='post' class='row g-3'>"
+        "<form method='post' class='row g-3' id='student-edit-form'>"
+        + "<script src='/static/js/academic-cascade.js' defer></script>"
         + "".join(controls)
+        # Relational academic placement: department -> trade -> level -> class.
+        # Existing values are preselected; mismatches are flagged for review.
+        + f"<div class='col-md-6'><label class='form-label' for='edit-department'>Department</label>"
+        f"<select class='form-select' id='edit-department' name='department' data-academic='department' "
+        f"data-value-field='name' data-targets='trade,level,class_name' data-initial='{escape(form['department'])}' required>"
+        f"<option value=''>Loading departments...</option></select></div>"
+        + f"<div class='col-md-6'><label class='form-label' for='edit-trade'>Trade</label>"
+        f"<select class='form-select' id='edit-trade' name='trade' data-academic='trade' data-parent='department' "
+        f"data-value-field='name' data-targets='level,class_name' data-initial='{escape(form['trade'])}' required disabled>"
+        f"<option value=''>Select a department first.</option></select></div>"
+        + f"<div class='col-md-6'><label class='form-label' for='edit-level'>Level</label>"
+        f"<select class='form-select' id='edit-level' name='level' data-academic='level' data-parent='trade' "
+        f"data-targets='class_name' data-initial='{escape(form['level'])}' required disabled>"
+        f"<option value=''>Select a trade first...</option></select></div>"
+        + f"<div class='col-md-6'><label class='form-label' for='edit-class_name'>Class</label>"
+        f"<select class='form-select' id='edit-class_name' name='class_name' data-academic='class' "
+        f"data-parents='trade,level' data-value-field='name' data-initial='{escape(form['class_name'])}' required disabled>"
+        f"<option value=''>Select a trade first...</option></select></div>"
         + f"<div class='col-md-6'><label class='form-label' for='edit-gender'>Gender</label><select class='form-select' id='edit-gender' name='gender' required>{gender_options}</select></div>"
         + "<div class='col-12 d-flex gap-2 flex-wrap'><button class='btn btn-accent' type='submit'>Save changes</button>"
         + f"<a class='btn btn-outline-secondary' href='{url_for('student_profile_by_id', student_id=student.id)}'>Cancel</a></div></form></section>"
@@ -422,6 +469,13 @@ def students():
             or (student.department or student.trade) != department
             for student in existing_class_students
         )
+        placement_error = None
+        try:
+            canonical_department, trade, level, class_name = validate_placement(trade, level, class_name)
+            department = department or canonical_department
+            form_values["class_name"] = class_name
+        except AcademicValidationError as error:
+            placement_error = str(error)
 
         if not uid:
             flash("Tap the student's RFID card or select a pending card before registering.", "danger")
@@ -445,8 +499,17 @@ def students():
             flash("Department, guardian details, phone, or address exceed the allowed length.", "danger")
         elif not valid_guardian_phone:
             flash("Enter a valid guardian phone number with at least 7 digits.", "danger")
+<<<<<<< Updated upstream
         elif not is_valid_academic_placement(department, trade, level, class_name):
             flash("Choose a department, trade, level, and class from the available options.", "danger")
+=======
+        elif trade not in PROGRAM_LEVELS or level not in PROGRAM_LEVELS.get(trade, []):
+            flash("Choose a valid programme, level, and class name.", "danger")
+        elif placement_error:
+            flash(placement_error, "danger")
+        elif CLASS_TRADE_LEVEL.get(class_name) != (trade, level):
+            flash("Choose a class from the selected programme and level.", "danger")
+>>>>>>> Stashed changes
         elif class_scope_conflict:
             flash("That class name is already used by a different trade or level. Choose a unique class name.", "danger")
         elif User.query.filter_by(username=username).first():
@@ -574,7 +637,25 @@ def students():
         f'<option value="{gender}"{" selected" if gender == form_values["gender"] else ""}>{gender}</option>'
         for gender in ("Female", "Male", "Other")
     )
+<<<<<<< Updated upstream
     placement_fields = render_academic_placement_fields("registration", form_values)
+=======
+    class_name_options = "".join(
+        f'<option value="{escape(class_name)}" data-trade="{escape(class_trade)}" data-level="{escape(class_level)}"{" selected" if class_name == form_values["class_name"] else ""}>{escape(class_name)}</option>'
+        for class_name, (class_trade, class_level) in CLASS_TRADE_LEVEL.items()
+    )
+    level_options = "".join(
+        f'<option value="{escape(level)}" data-trade="{escape(trade)}"{" selected" if level == form_values["level"] else ""}>{escape(level)}</option>'
+        for trade, levels in PROGRAM_LEVELS.items() for level in levels
+    )
+    department_names = sorted({d.name for d in Department.query.filter_by(is_active=True).all()}) \
+        or list(DEPARTMENTS)
+    known_departments = sorted(
+        {student.department or student.trade for student in all_students if student.department or student.trade},
+        key=str.casefold,
+    )
+    department_options = "".join(f'<option value="{escape(value)}">' for value in known_departments)
+>>>>>>> Stashed changes
     pending_section = f"""<section class="panel"><div class="student-registration-header"><h1>Student <span class="accent">Registration</span></h1><p class="muted">Tap an unassigned card on the connected RFID reader while this page is open. The UID is read automatically, fills the form, and is required to save. You can also select a card from the pending list.</p><a class="btn btn-sm btn-outline-secondary mt-3" href="#registered-students">View existing students</a></div><h3 class="mt-4 pending-section-title">Pending Scanned RFID Cards</h3><div class='table-responsive'><table class="table pending-cards-table"><thead><tr><th>UID</th><th>Last Scanned</th><th>Action</th></tr></thead><tbody id='pending-rfid-rows'>{pending_rows or '<tr data-empty-row><td colspan="3" class="muted">No unregistered RFID cards are pending.</td></tr>'}</tbody></table></div><dialog id='pending-rfid-details' class='student-review-dialog'><h2>Pending RFID Card</h2><dl class='student-review-details'><dt>UID</dt><dd id='pending-card-view-uid'></dd><dt>First scanned</dt><dd id='pending-card-view-first'></dd><dt>Last scanned</dt><dd id='pending-card-view-last'></dd></dl><div class='student-review-actions'><button type='button' class='btn btn-outline-secondary' data-close-pending-card>Close</button></div></dialog></section>""" if can_register else ""
     registration_form = f"""<section class="panel"><h2>Register New Student</h2><form id="student-registration-form" method="post" class="row g-3 student-registration-form">
 <div class="col-md-6"><label class="form-label">Student Full Name</label><input name="full_name" maxlength="160" class="form-control" value="{escape(form_values['full_name'])}" required></div>
@@ -583,7 +664,15 @@ def students():
 <div class="col-md-4"><label class="form-label">Username</label><input name="username" maxlength="80" class="form-control" value="{escape(form_values['username'])}" required></div>
 <div class="col-md-4"><label class="form-label">Temporary Password (8+ chars)</label><input name="password" type="password" minlength="8" class="form-control" required></div>
 <div class="col-md-6"><label class="form-label" for="uid">RFID Card UID</label><input id="uid" name="uid" class="form-control" value="{escape(form_values['uid'])}" placeholder="Waiting for card scan" autocomplete="off" required readonly><small id="rfid-scan-status" class="form-text muted" aria-live="polite">Waiting for the connected reader. The UID fills automatically when you scan a card.</small></div>
+<<<<<<< Updated upstream
 {placement_fields}
+=======
+<div class="col-md-4"><label class="form-label">Department</label><select name="department" class="form-select" data-academic="department" data-value-field="name" data-targets="trade,level,class_name" data-initial="{escape(form_values['department'])}" required><option value="">Loading departments...</option></select><script>window.AcademicCascade&&window.AcademicCascade.init(document.querySelector('.student-registration-form'));</script></div>
+<div class="col-md-4"><label class="form-label">Trade</label><select name="trade" class="form-select trade-select" data-academic="trade" data-parent="department" data-value-field="name" data-targets="level,class_name" data-initial="{escape(form_values['trade'])}" required disabled><option value="">Select a department first.</option></select></div>
+<div class="col-md-4"><label class="form-label">Level</label><select name="level" class="form-select level-select" data-academic="level" data-parent="trade" data-targets="class_name" data-initial="{escape(form_values['level'])}" required disabled><option value="">Select a trade first...</option></select></div>
+<div class="col-md-4"><label class="form-label">Class</label><select id="class-choice" class="form-select" data-academic="class" data-parents="trade,level" data-value-field="name" data-initial="{escape(form_values['class_name'])}" required disabled><option value="">Select a trade first...</option></select><input type="hidden" name="class_name" id="class-name" value="{escape(form_values['class_name'])}" data-initial-class="{escape(form_values['class_name'])}"></div>
+<div class="col-md-4"><label class="form-label">Class Section</label><input name="class_section" maxlength="50" class="form-control" value="{escape(form_values['class_section'])}" placeholder="A, B, Morning (optional)"></div>
+>>>>>>> Stashed changes
 <div class="col-md-4"><label class="form-label">Academic Year</label><input name="academic_year" maxlength="9" pattern="[0-9]{{4}}-[0-9]{{4}}" placeholder="2026-2027" class="form-control" value="{escape(form_values['academic_year'])}" required></div>
 <div class="col-md-4"><label class="form-label">Guardian Full Name</label><input name="guardian_name" maxlength="160" class="form-control" value="{escape(form_values['guardian_name'])}" required></div>
 <div class="col-md-4"><label class="form-label">Relationship to Student</label><input name="guardian_relationship" maxlength="80" class="form-control" value="{escape(form_values['guardian_relationship'])}" placeholder="Parent, aunt, uncle..." required></div>
@@ -614,8 +703,13 @@ def students():
     body = f"""<style>.student-registration-header{{margin-bottom:20px}}.student-registration-header h1{{font-size:clamp(1.5rem,2.4vw,2rem)}}.student-registration-header p{{max-width:850px;font-size:1rem;line-height:1.5;margin-bottom:0}}.pending-section-title{{font-size:1.25rem!important}}.pending-cards-table{{width:100%;margin-bottom:0}}.student-registration-form{{row-gap:1.25rem!important}}.student-registration-form .form-label{{display:block;font-weight:650;margin-bottom:.45rem}}.student-registration-form .form-control,.student-registration-form .form-select{{min-height:48px}}.student-registration-form h2{{margin-bottom:.25rem}}.student-review-dialog{{width:min(620px,calc(100vw - 28px));max-height:85vh;overflow:auto;border:1px solid var(--border);border-radius:16px;padding:22px;background:var(--card);color:var(--text)}}.student-review-dialog::backdrop{{background:rgba(5,10,15,.68)}}.student-review-dialog h2{{font-size:1.3rem;margin-bottom:8px}}.student-review-details{{display:grid;grid-template-columns:minmax(120px,.4fr) minmax(0,1fr);gap:8px 16px;margin:18px 0}}.student-review-details dt{{font-weight:700;color:var(--muted)}}.student-review-details dd{{margin:0;overflow-wrap:anywhere;white-space:pre-wrap}}.student-review-actions{{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}}@media(max-width:480px){{.student-review-dialog{{padding:16px}}.student-review-details{{grid-template-columns:1fr;gap:2px 0}}.student-review-details dd{{margin-bottom:8px}}}}</style>{status_filters}{pending_section}
 {registration_form}
 {bulk_archive_form}
+<<<<<<< Updated upstream
 <section class="panel registered-students-panel" id="registered-students"><h2>Registered Students</h2><p class="muted">View the full profile, edit student details, or delete the account from active records while retaining attendance and academic history.</p><div class="table-responsive registered-students-table"><table class="table"><thead><tr><th>Name / Status</th><th>Admission Number</th><th>Class</th><th>Department</th><th>Trade</th><th>Level</th><th>RFID UID</th><th>Parent</th><th>Actions</th></tr></thead><tbody>{student_rows or '<tr><td colspan="9" class="muted">No students match this status.</td></tr>'}</tbody></table></div><div class="registered-student-cards">{student_cards or '<p class="muted mb-0">No students match this status.</p>'}</div></section>"""
     body = """<style>
+=======
+<section class="panel registered-students-panel" id="registered-students"><h2>Registered Students</h2><p class="muted">View the full profile, edit student details, or delete the account from active records while retaining attendance and academic history.</p><div class="table-responsive registered-students-table"><table class="table"><thead><tr><th>Name / Status</th><th>Admission Number</th><th>Class</th><th>Department</th><th>Trade</th><th>Level</th><th>Class Section</th><th>Update Department / Section</th><th>RFID UID</th><th>Parent</th><th>Actions</th></tr></thead><tbody>{student_rows or '<tr><td colspan="11" class="muted">No students match this status.</td></tr>'}</tbody></table></div><div class="registered-student-cards">{student_cards or '<p class="muted mb-0">No students match this status.</p>'}</div></section>"""
+    body = """<script src="/static/js/academic-cascade.js" defer></script><style>
+>>>>>>> Stashed changes
 .student-registration-picker{position:relative;min-width:0;width:100%}
 .student-registration-picker-source{display:none!important}
 .student-registration-picker-input{width:100%;min-width:0;text-overflow:ellipsis;white-space:nowrap}
@@ -745,6 +839,19 @@ finally{polling=false;}
 refreshPendingCards();window.setInterval(refreshPendingCards,2000);
 })();</script>"""
     body += """<script>(()=>{
+<<<<<<< Updated upstream
+=======
+const field=document.getElementById('class-name'),choice=document.getElementById('class-choice');
+if(!field||!choice)return;
+choice.addEventListener('change',()=>{field.value=choice.value||'';});
+document.addEventListener('DOMContentLoaded',()=>setTimeout(()=>{
+const initial=field.dataset.initialClass||'';if(!initial)return;
+const apply=()=>{if([...choice.options].some(option=>option.value===initial)){choice.value=initial;field.value=initial;choice.dispatchEvent(new Event('change',{bubbles:true}));}};
+apply();setTimeout(apply,1200);
+},0));
+})();</script>"""
+    body += """<script>(()=>{
+>>>>>>> Stashed changes
 const form=document.querySelector('.student-registration-form');
 const dialog=document.getElementById('student-review-dialog');
 const details=document.getElementById('student-review-details');

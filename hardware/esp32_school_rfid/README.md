@@ -52,9 +52,18 @@ LCD backpacks commonly use address `0x27`; some use `0x3F`. Change `LCD_ADDRESS`
 1. Install the Espressif ESP32 board package **3.3.12 or newer** in Arduino IDE. This sketch uses its trusted built-in CA bundle for HTTPS verification.
 2. Install these libraries from Library Manager: **MFRC522**, **LiquidCrystal I2C**, and **ArduinoJson**.
 3. Copy `rfid_config.example.h` to `rfid_config.h`, then set `WIFI_SSID`, `WIFI_PASSWORD`, and `RFID_DEVICE_TOKEN` in the new local file. `rfid_config.h` is ignored by Git. Keep `RFID_CLASS_NAME` empty to allow cards from every registered class. This is the only active `.ino` sketch in the folder; `esp32_school_rfid123.ino.disabled` is an older backup and must not be renamed to `.ino` while compiling this sketch.
-4. The sketch is already configured for the hosted HTTPS app at `https://smart-management-school.onrender.com`. Do not change it to `localhost`, `127.0.0.1`, or a private `192.168...` address.
+4. Set the server address in `rfid_config.h`. The status URL the reader polls is **`SERVER_BASE_URL + STATUS_ENDPOINT_PATH`**:
+
+   ```cpp
+   const char *SERVER_BASE_URL      = "http://192.168.1.182:5000"; // no trailing slash
+   const bool  SERVER_USE_HTTPS     = false;
+   const char *RFID_ENDPOINT_PATH   = "/student/rfid-login";
+   const char *STATUS_ENDPOINT_PATH = "/student/rfid-status";
+   ```
+
+   That produces `http://192.168.1.182:5000/student/rfid-status`. For the hosted app use `"https://smart-management-school.onrender.com"` with `SERVER_USE_HTTPS = true` (the sketch then syncs NTP before using TLS). Never paste the URL with a space (`"/ student/rfid-status"`) - the router then cannot match the route.
 5. In the Render service's Environment settings, set a new, long random `RFID_DEVICE_TOKEN` and leave `RFID_DEVICE_CLASS` blank for multi-class operation. Put the same token in local `rfid_config.h`, then redeploy the service. The status endpoint requires a non-empty server token; the scan endpoint may still accept scans when that setting is missing, which can make registration/scanning appear to work while the LCD shows a status sync error. Keep the class blank on both sides unless this reader should be restricted to one exact class.
-6. Connect the ESP32 to Wi-Fi with internet access. The device synchronizes its clock with NTP before using HTTPS so it can validate the server certificate.
+6. Connect the ESP32 to Wi-Fi that can reach `SERVER_BASE_URL`. With `SERVER_USE_HTTPS = true` the device synchronizes its clock with NTP so it can validate the server certificate; plain HTTP on the LAN needs no clock sync. The status poll URL and its HTTP code are printed in Serial Monitor (`[status] GET ...`).
 7. Select the matching ESP32 board and port, upload, and open Serial Monitor at `115200` baud.
 
 The firmware sends the uppercase, zero-padded UID as JSON to Flask over HTTPS, prints the request and complete HTTP response in Serial Monitor, and displays the attendance status returned by Flask on the LCD. It ignores a repeat of the same UID for 10 seconds after the response display finishes. TLS certificate checks remain enabled; do not replace them with `setInsecure()`.

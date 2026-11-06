@@ -25,12 +25,12 @@ from .meetings import (StudentGuardian, Meeting, MeetingParticipant, MeetingAtte
 from .announcement import Announcement
 from .correspondence import Correspondence
 from .activity import ActivityLog
-from .academic_structure import School, Department, Trade, SchoolClass, AcademicYear, AcademicTerm
+from .academic_structure import School, Department, Trade, SchoolClass, AcademicModule, AcademicYear, AcademicTerm
 from .enrollment import AcademicEnrollment
 from .welfare import StudentWelfareRecord, DailyWelfareReport, WelfareAuditEvent
 
 __all__ = [
-    "School", "Department", "Trade", "SchoolClass", "AcademicYear", "AcademicTerm",
+    "School", "Department", "Trade", "SchoolClass", "AcademicModule", "AcademicYear", "AcademicTerm",
     "AcademicEnrollment", "User", "Attendance", "AttendanceAuditTrail", "PendingCard",
     "RFIDCard", "RFIDDevice", "RFIDScanLog", "FeeTransaction", "FeeRequirement",
     "Book", "BookLoan", "DisciplineCase", "BehaviorRecord", "SchoolMessage",

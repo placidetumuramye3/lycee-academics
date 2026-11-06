@@ -452,6 +452,97 @@ def test_teacher_attendance_totals_only_include_assigned_classes(app):
     assert b"L4 Software Development A" not in response.data
 
 
+def _make_attendance_filter_app(app):
+    with app.app_context():
+        l4_a = add_student("filter_l4_a", "Filter L4 A", "L4 Software Development A")
+        l4_a.department, l4_a.trade, l4_a.level, l4_a.class_section = (
+            "ICT and Multimedia", "Software Development", "L4", "A")
+        l4_b = add_student("filter_l4_b", "Filter L4 B", "L4 Software Development A")
+        l4_b.department, l4_b.trade, l4_b.level, l4_b.class_section = (
+            "ICT and Multimedia", "Software Development", "L4", "B")
+        l5 = add_student("filter_l5", "Filter L5", "L5 Software Development")
+        l5.department, l5.trade, l5.level = "ICT and Multimedia", "Software Development", "L5"
+        fashion = add_student("filter_fashion", "Filter Fashion", "L4 Fashion and Design")
+        fashion.department, fashion.trade, fashion.level = (
+            "Fashion and Design", "Fashion and Design", "L4")
+        admin = User(username="attendance_filter_admin", full_name="Attendance Filter Admin",
+                     password_hash="test-hash", role="master_admin", is_active_account=True)
+        db.session.add_all([
+            Attendance(student_id=l4_a.id, day=date.today().isoformat(), status="Present"),
+            Attendance(student_id=l5.id, day=date.today().isoformat(), status="Late"),
+            admin,
+        ])
+        set_setting("late_after", "23:59")
+        db.session.commit()
+        admin_id = admin.id
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session["_user_id"] = str(admin_id)
+        session["_fresh"] = True
+    return client
+
+
+def test_attendance_filter_dropdowns_are_ordered_and_require_a_department(app):
+    client = _make_attendance_filter_app(app)
+    html = client.get("/attendance").get_data(as_text=True)
+    positions = [html.index(f"id='attendance-{field}'")
+                 for field in ("department", "trade", "level", "class_name", "class_section")]
+    assert positions == sorted(positions)
+    assert "data-filter-level='0'" in html
+    assert "data-attendance-filter" in html
+    assert "/static/js/attendance-filter.js" in html
+    # Only departments that actually have students are offered.
+    assert "<option value='ICT and Multimedia'>ICT and Multimedia</option>" in html
+    assert "<option value='Fashion and Design'>Fashion and Design</option>" in html
+    # Trade is disabled until a department is selected.
+    assert "id='attendance-trade' name='trade' data-filter-level='1' disabled" in html
+
+
+def test_attendance_filter_offers_only_levels_of_the_selected_trade(app):
+    client = _make_attendance_filter_app(app)
+    html = client.get(
+        "/attendance?department=Fashion+and+Design").get_data(as_text=True)
+    level_select = html[html.index("id='attendance-level'"):]
+    level_select = level_select[:level_select.index("</select>")]
+    assert ">L4</option>" in level_select
+    assert ">L5</option>" not in level_select
+    trade_select = html[html.index("id='attendance-trade'"):]
+    trade_select = trade_select[:trade_select.index("</select>")]
+    assert "value='Fashion and Design'" in trade_select
+    assert "value='Software Development'" not in trade_select
+
+
+def test_attendance_filter_class_section_ab_narrows_totals(app):
+    client = _make_attendance_filter_app(app)
+    html = client.get(
+        "/attendance?department=ICT+and+Multimedia&trade=Software+Development"
+        "&level=L4&class_name=L4+Software+Development+A&class_section=A").get_data(as_text=True)
+    section_select = html[html.index("id='attendance-class_section'"):]
+    section_select = section_select[:section_select.index("</select>")]
+    assert "value='A'" in section_select
+    assert "value='B'" in section_select
+    assert "Showing " in html
+    assert "Filter L4 A" in html
+    assert "Filter L4 B" not in html
+    # The enrollment count for the filtered section is shown in the totals.
+    assert "<td>ICT and Multimedia</td><td>Software Development</td><td>L4</td>" in html
+
+
+def test_attendance_filter_ignores_out_of_scope_combinations(app):
+    client = _make_attendance_filter_app(app)
+    html = client.get(
+        "/attendance?department=Fashion+and+Design&trade=Software+Development"
+        "&level=L5&class_name=L4+Software+Development+A").get_data(as_text=True)
+    assert "value='L4 Software Development A' selected" not in html
+    assert "Filter L5" not in html
+    # The department is valid but its selected trade is not: nothing is
+    # invented, so the page falls back to an empty scoped result.
+    assert "Filter L4 A" not in html
+    assert "Filter L4 B" not in html
+    assert "Filter Fashion" not in html
+    assert "Showing Fashion and Design" in html
+
+
 def test_attendance_level_group_filter_shows_l3_and_s4_together(app):
     today = date.today().isoformat()
     with app.app_context():
@@ -486,10 +577,11 @@ def test_attendance_level_group_filter_shows_l3_and_s4_together(app):
         session["_user_id"] = str(admin_id)
         session["_fresh"] = True
 
-    response = client.get("/attendance?level_group=L3-S4")
-
-    assert response.status_code == 200
-    assert b"<option value='L3-S4' selected>" in response.data
-    assert b"Level 3 Student" in response.data
-    assert b"Level S4 Student" in response.data
-    assert b"Level 4 Student" not in response.data
+    for level_group, expected, excluded in (("L3-S4", ("Level 3 Student", "Level S4 Student"), "Level 4 Student"),
+                                            ("L4-S5", ("Level 4 Student",), "Level 3 Student")):
+        response = client.get(f"/attendance?level_group={level_group}")
+        assert response.status_code == 200
+        assert b"Showing all departments, trades, levels, classes, and sections" in response.data
+        for name in expected:
+            assert name.encode() in response.data
+        assert excluded.encode() not in response.data

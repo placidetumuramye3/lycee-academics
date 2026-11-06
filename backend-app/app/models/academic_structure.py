@@ -46,6 +46,25 @@ class SchoolClass(db.Model):
     __table_args__ = (db.UniqueConstraint("trade_id", "name", name="uq_class_trade_name"),)
 
 
+class AcademicModule(db.Model):
+    __tablename__ = "academic_module"
+    id = db.Column(db.Integer, primary_key=True)
+    trade_id = db.Column(db.Integer, db.ForeignKey("trade.id"), nullable=False, index=True)
+    level = db.Column(db.String(30), nullable=False)
+    name = db.Column(db.String(180), nullable=False)
+    code = db.Column(db.String(50))
+    category = db.Column(db.String(32), default="Specific")
+    # ``weight`` holds the teaching hours (legacy column name). Periods and the
+    # assessment weight are stored explicitly so every page agrees.
+    weight = db.Column(db.Float, default=1.0)
+    periods = db.Column(db.Float)
+    assessment_weight = db.Column(db.Float, default=1.0)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    trade = db.relationship("Trade", backref=db.backref("modules", cascade="all, delete-orphan"))
+    __table_args__ = (db.UniqueConstraint("trade_id", "level", "name", name="uq_module_trade_level_name"),)
+
+
 class AcademicYear(db.Model):
     __tablename__ = "academic_year"
     id = db.Column(db.Integer, primary_key=True)

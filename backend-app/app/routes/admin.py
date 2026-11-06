@@ -22,6 +22,9 @@ from app.utils.rendering import page
 from app.utils.decorators import permission_for
 from app.services.activity import log_student_activity
 from app.services.meeting_workflow import verify_guardian_link
+from app.services.academic_catalog import (
+    AcademicValidationError, full_structure, validate_teacher_assignment,
+)
 
 def admin():
     if request.method == "POST":
@@ -175,10 +178,21 @@ def admin():
                     subject = assignment_subjects[index].strip() if index < len(assignment_subjects) else ""
                     if not any((department, trade, level, class_name, subject)):
                         continue
+<<<<<<< Updated upstream
                     if not is_valid_academic_placement(department, trade, level, class_name) or not subject:
                         assignment_error = True
                         break
                     assignments.append((department, trade, level, class_name, subject))
+=======
+                    try:
+                        assignment = validate_teacher_assignment(
+                            trade.casefold(), level.casefold(), class_name.casefold(),
+                            subject.casefold())
+                    except AcademicValidationError:
+                        assignment_error = True
+                        break
+                    assignments.append(assignment)
+>>>>>>> Stashed changes
                 if not assignments:
                     assignment_error = True
                 assignment_keys = [
@@ -250,6 +264,7 @@ def admin():
     teachers = [u for u in users if u.role == "teacher"]
     class_names = sorted({student.class_name for student in students if student.class_name})
     class_options = "".join(f"<option value='{name}'>{name}</option>" for name in class_names)
+<<<<<<< Updated upstream
     staff_department_options = "".join(
         f'<option value="{escape(department)}">{escape(department)}</option>'
         for department in DEPARTMENTS
@@ -269,14 +284,28 @@ def admin():
         for trade, level_map in trade_map.items()
         for level, class_names in level_map.items()
         for class_name in class_names
+=======
+    staff_structure = full_structure()
+    staff_trades = [trade for department in staff_structure for trade in department['trades']]
+    staff_trade_options = "".join(
+        f'<option value="{escape(trade["name"])}">{escape(trade["name"])}</option>'
+        for trade in staff_trades
+    )
+    staff_level_options = "".join(
+        f'<option value="{escape(level)}" data-trade="{escape(trade["name"])}">{escape(level)}</option>'
+        for trade in staff_trades for level in sorted(trade['levels'])
+    )
+    staff_class_options = "".join(
+        f'<option value="{escape(klass["name"])}" data-trade="{escape(trade["name"])}" data-level="{escape(level)}">{escape(klass["name"])}</option>'
+        for trade in staff_trades for level, details in trade['levels'].items()
+        for klass in details['classes']
+>>>>>>> Stashed changes
     )
     staff_subject_options = "".join(
-        f'<option value="{escape(subject)}">' for subject in (
-            "Accounting", "Accounting Professional", "FAD", "Mathematics",
-            "Computer Literacy and Skills", "Religious Education", "Business",
-            "Citizenship", "Occupation", "Social and Health Education (SHE)",
-            "General Studies",
-        )
+        f'<option value="{escape(module["name"])}" data-trade="{escape(trade["name"])}" data-level="{escape(level)}">'
+        f'{escape(module["code"] + " - " if module["code"] else "")}{escape(module["name"])}</option>'
+        for trade in staff_trades for level, details in trade['levels'].items()
+        for module in details['modules']
     )
     user_row_html = []
     for user in users:
@@ -352,7 +381,12 @@ def admin():
         f"<option value='{role}'>{'Master Admin - Full system administrator' if role == 'master_admin' else 'Head Teacher - School-wide academic and student affairs supervision' if role == 'head_teacher' else 'Accountant - School finances and fee reporting' if role == 'accountant' else 'Discipline Officer - Student behavior and discipline cases' if role == 'discipline' else 'Librarian - Books, loans, returns, and overdue tracking' if role == 'librarian' else 'Matron / Patron - Boarding student supervision' if role in {'matron', 'patron'} else 'Secretary - Official correspondence and authorized reports' if role == 'secretary' else 'Teacher - Classes, lessons, assessments, and academic reports' if role == 'teacher' else role.replace('_', ' ').title()}</option>"
         for role in sorted(STAFF_ROLES)
     )
+<<<<<<< Updated upstream
     body = f"""<section class="panel"><h1>Master Admin <span class="accent">Control Center</span></h1><p class="muted"><strong>Master Admin</strong> is the main system administrator. This role manages users, roles, permissions, and system settings, with access to all school information.</p><p class="muted"><strong>Head Teacher</strong> leads school activities and supervises teachers, students, examination results, discipline, and general school reports.</p><p class="muted"><strong>Accountant</strong> manages school finances, student payments, receipts, outstanding fees, and financial reports.</p><p class="muted"><strong>Discipline Officer</strong> manages student behavior, disciplinary offenses, punishments, discipline reports, and measures to resolve disciplinary issues.</p><p class="muted"><strong>Librarian</strong> manages library books, registers new books, issues and receives books, and tracks overdue or unreturned books.</p><p class="muted"><strong>Matron / Patron</strong> manages boarding students, monitors attendance in the dormitories, supervises behavior, and handles issues affecting assigned students.</p><p class="muted"><strong>Secretary</strong> manages official letters and documents, receives and sends correspondence, and prepares administrative reports they are authorized to access.</p><p class="muted"><strong>Teacher</strong> manages attendance for assigned classes, lessons, assessments, and academic reports.</p><p class="muted"><strong>Student</strong> can view personal examination results, attendance records, class timetables, school announcements, and outstanding school fees according to assigned permissions.</p><p class="muted"><strong>Parent / Guardian</strong> can view information about their child, including examination results, attendance, paid or outstanding fees, and school announcements.</p><div class="row g-4"><div class="col-md-6"><h3>Create Staff Account</h3><form method="post" id="create-staff-form"><input type="hidden" name="action" value="create_staff"><label class="mt-2">Full Name</label><input class="form-control" name="full_name" required><label class="mt-2">Username</label><input class="form-control" name="username" required><label class="mt-2">Role</label><select class="form-select" name="role">{role_options}</select><div class="teacher-class-fields" hidden><p class="muted mt-2 mb-1">Assign one or more lessons. You can include classes from different trades or departments.</p><div id="teacher-assignments"><div class="teacher-assignment row g-2 border rounded p-2 mt-2"><div class="col-md-3"><label>Trade / Department</label><select class="form-select assignment-trade" name="assignment_trade[]"><option value="">Choose trade...</option>{staff_trade_options}</select></div><div class="col-md-2"><label>Level</label><select class="form-select assignment-level" name="assignment_level[]" disabled><option value="">Choose trade first...</option>{staff_level_options}</select></div><div class="col-md-3"><label>Class</label><select class="form-select assignment-class" name="assignment_class[]" disabled><option value="">Choose level first...</option>{staff_class_options}</select></div><div class="col-md-3"><label>Lesson / Subject</label><input class="form-control" name="assignment_subject[]" maxlength="160" list="general-course-subjects" placeholder="e.g. Software Development"></div><div class="col-md-1 d-flex align-items-end"><button class="btn btn-outline-danger remove-assignment" type="button" aria-label="Remove assignment">&times;</button></div></div></div><datalist id="general-course-subjects">{staff_subject_options}</datalist><button class="btn btn-sm btn-outline-primary mt-2" type="button" id="add-teacher-assignment">Add another class / lesson assignment</button></div><label class="mt-2">Password (8+ chars)</label><input type="password" minlength="8" class="form-control" name="password" required><button class="btn btn-accent mt-3">Create Staff Account</button></form><template id="teacher-assignment-template"><div class="teacher-assignment row g-2 border rounded p-2 mt-2"><div class="col-md-3"><label>Trade / Department</label><select class="form-select assignment-trade" name="assignment_trade[]"><option value="">Choose trade...</option>{staff_trade_options}</select></div><div class="col-md-2"><label>Level</label><select class="form-select assignment-level" name="assignment_level[]" disabled><option value="">Choose trade first...</option>{staff_level_options}</select></div><div class="col-md-3"><label>Class</label><select class="form-select assignment-class" name="assignment_class[]" disabled><option value="">Choose level first...</option>{staff_class_options}</select></div><div class="col-md-3"><label>Lesson / Subject</label><input class="form-control" name="assignment_subject[]" maxlength="160" list="general-course-subjects" placeholder="e.g. Software Development"></div><div class="col-md-1 d-flex align-items-end"><button class="btn btn-outline-danger remove-assignment" type="button" aria-label="Remove assignment">&times;</button></div></div></template><script>(function(){{const container=document.getElementById('teacher-assignments'),template=document.getElementById('teacher-assignment-template');function setup(row){{const trade=row.querySelector('.assignment-trade'),level=row.querySelector('.assignment-level'),klass=row.querySelector('.assignment-class'),levels=[...level.querySelectorAll('option[data-trade]')],classes=[...klass.querySelectorAll('option[data-trade]')];function updateLevels(){{level.innerHTML='<option value="">Choose level...</option>';levels.filter(option=>option.dataset.trade===trade.value).forEach(option=>level.appendChild(option.cloneNode(true)));level.disabled=!trade.value;updateClasses()}}function updateClasses(){{klass.innerHTML='<option value="">Choose class...</option>';classes.filter(option=>option.dataset.trade===trade.value&&option.dataset.level===level.value).forEach(option=>klass.appendChild(option.cloneNode(true)));klass.disabled=!trade.value||!level.value}}trade.addEventListener('change',updateLevels);level.addEventListener('change',updateClasses);row.querySelector('.remove-assignment').addEventListener('click',()=>{{if(container.children.length>1)row.remove()}})}}container.querySelectorAll('.teacher-assignment').forEach(setup);document.getElementById('add-teacher-assignment').addEventListener('click',()=>{{const fragment=template.content.cloneNode(true),row=fragment.querySelector('.teacher-assignment');container.appendChild(fragment);setup(row)}})}})();</script></div>
+=======
+
+    body = f"""<section class="panel"><h1>Master Admin <span class="accent">Control Center</span></h1><p class="muted"><strong>Master Admin</strong> is the main system administrator. This role manages users, roles, permissions, and system settings, with access to all school information.</p><p class="muted"><strong>Head Teacher</strong> leads school activities and supervises teachers, students, examination results, discipline, and general school reports.</p><p class="muted"><strong>Accountant</strong> manages school finances, student payments, receipts, outstanding fees, and financial reports.</p><p class="muted"><strong>Discipline Officer</strong> manages student behavior, disciplinary offenses, punishments, discipline reports, and measures to resolve disciplinary issues.</p><p class="muted"><strong>Librarian</strong> manages library books, registers new books, issues and receives books, and tracks overdue or unreturned books.</p><p class="muted"><strong>Matron / Patron</strong> manages boarding students, monitors attendance in the dormitories, supervises behavior, and handles issues affecting assigned students.</p><p class="muted"><strong>Secretary</strong> manages official letters and documents, receives and sends correspondence, and prepares administrative reports they are authorized to access.</p><p class="muted"><strong>Teacher</strong> manages attendance for assigned classes, lessons, assessments, and academic reports.</p><p class="muted"><strong>Student</strong> can view personal examination results, attendance records, class timetables, school announcements, and outstanding school fees according to assigned permissions.</p><p class="muted"><strong>Parent / Guardian</strong> can view information about their child, including examination results, attendance, paid or outstanding fees, and school announcements.</p><div class="row g-4"><div class="col-md-6"><h3>Create Staff Account</h3><form method="post" id="create-staff-form"><input type="hidden" name="action" value="create_staff"><label class="mt-2">Full Name</label><input class="form-control" name="full_name" required><label class="mt-2">Username</label><input class="form-control" name="username" required><label class="mt-2">Role</label><select class="form-select" name="role">{role_options}</select><div class="teacher-class-fields" hidden><p class="muted mt-2 mb-1">Assign one or more lessons. You can include classes from different trades or departments.</p><div id="teacher-assignments"><div class="teacher-assignment row g-2 border rounded p-2 mt-2"><div class="col-md-3"><label>Trade / Department</label><select class="form-select assignment-trade" name="assignment_trade[]"><option value="">Choose trade...</option>{staff_trade_options}</select></div><div class="col-md-2"><label>Level</label><select class="form-select assignment-level" name="assignment_level[]" disabled><option value="">Choose trade first...</option>{staff_level_options}</select></div><div class="col-md-3"><label>Class</label><select class="form-select assignment-class" name="assignment_class[]" disabled><option value="">Choose level first...</option>{staff_class_options}</select></div><div class="col-md-3"><label>Lesson / Subject</label><select class="form-select assignment-subject" name="assignment_subject[]" aria-label="Lesson / Subject" disabled required><option value="">Choose class first...</option>{staff_subject_options}</select></div><div class="col-md-1 d-flex align-items-end"><button class="btn btn-outline-danger remove-assignment" type="button" aria-label="Remove assignment">&times;</button></div></div></div><button class="btn btn-sm btn-outline-primary mt-2" type="button" id="add-teacher-assignment">Add another class / lesson assignment</button></div><label class="mt-2">Password (8+ chars)</label><input type="password" minlength="8" class="form-control" name="password" required><button class="btn btn-accent mt-3">Create Staff Account</button></form><template id="teacher-assignment-template"><div class="teacher-assignment row g-2 border rounded p-2 mt-2"><div class="col-md-3"><label>Trade / Department</label><select class="form-select assignment-trade" name="assignment_trade[]"><option value="">Choose trade...</option>{staff_trade_options}</select></div><div class="col-md-2"><label>Level</label><select class="form-select assignment-level" name="assignment_level[]" disabled><option value="">Choose trade first...</option>{staff_level_options}</select></div><div class="col-md-3"><label>Class</label><select class="form-select assignment-class" name="assignment_class[]" disabled><option value="">Choose level first...</option>{staff_class_options}</select></div><div class="col-md-3"><label>Lesson / Subject</label><select class="form-select assignment-subject" name="assignment_subject[]" aria-label="Lesson / Subject" disabled required><option value="">Choose class first...</option>{staff_subject_options}</select></div><div class="col-md-1 d-flex align-items-end"><button class="btn btn-outline-danger remove-assignment" type="button" aria-label="Remove assignment">&times;</button></div></div></template><script src="{url_for('static', filename='js/staff-assignments.js')}" defer></script></div>
+>>>>>>> Stashed changes
 <div class="col-md-6"><h3>Link Parent to Student</h3><form method="post"><input type="hidden" name="action" value="link_parent"><label class="mt-2">Parent</label><select class="form-select" name="parent_id" required><option value="">Choose parent...</option>{parent_options}</select><label class="mt-2">Student</label><select class="form-select" name="student_id" required><option value="">Choose student...</option>{student_options}</select><button class="btn btn-accent mt-3">Link Parent & Student</button></form></div></div></section>
 <section class="panel"><h2>Assign Teacher to Class</h2><form method="post" class="row g-3 assign-teacher-form"><input type="hidden" name="action" value="assign_teacher_class"><div class="col-md-6"><label>Teacher</label><select class="form-select" name="teacher_id" required><option value="">Choose teacher...</option>{teacher_options}</select></div><div class="col-md-4"><label>Class</label><select class="form-select" name="class_name" required><option value="">Choose class...</option>{class_options}</select></div><div class="col-md-2 d-flex align-items-end"><button class="btn btn-accent">Save Assignment</button></div></form></section>
 <section class="panel"><h2>Home Page Motto</h2><p class="muted">Write or change the school's motto here. It appears beneath the school name on the public home page.</p><form method="post"><input type="hidden" name="action" value="save_motto"><label class="mt-2">School Motto</label><input class="form-control" name="school_motto" maxlength="200" value="{get_setting('school_motto', '').replace('&', '&amp;').replace('\"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')}" placeholder="Enter the official school motto"><button class="btn btn-accent mt-3">Save Motto</button></form></section>
@@ -415,5 +449,32 @@ if(node.matches('.teacher-assignment'))refresh(node);
 })();</script>"""
     return page("Admin Center", body, "master_admin")
 
+@login_required
+def api_academic_structure():
+    departments = Department.query.filter_by(is_active=True).all()
+    data = []
+    for dept in departments:
+        dept_data = {"id": dept.id, "name": dept.name, "trades": []}
+        for trade in dept.trades:
+            if not trade.is_active:
+                continue
+            trade_data = {"id": trade.id, "name": trade.name, "levels": {}}
+            classes = SchoolClass.query.filter_by(trade_id=trade.id, is_active=True).all()
+            for cls in classes:
+                lvl = cls.level
+                if lvl not in trade_data["levels"]:
+                    trade_data["levels"][lvl] = {"classes": [], "modules": []}
+                trade_data["levels"][lvl]["classes"].append({"id": cls.id, "name": cls.name})
+            modules = AcademicModule.query.filter_by(trade_id=trade.id, is_active=True).all()
+            for mod in modules:
+                lvl = mod.level
+                if lvl not in trade_data["levels"]:
+                    trade_data["levels"][lvl] = {"classes": [], "modules": []}
+                trade_data["levels"][lvl]["modules"].append({"id": mod.id, "name": mod.name, "code": mod.code, "category": mod.category})
+            dept_data["trades"].append(trade_data)
+        data.append(dept_data)
+    return jsonify(data)
+
 def register_routes(app):
     app.add_url_rule('/admin', endpoint='admin', view_func=permission_for('admin')(admin), methods=['GET', 'POST'])
+    app.add_url_rule('/api/academic-structure', endpoint='api_academic_structure', view_func=login_required(api_academic_structure), methods=['GET'])

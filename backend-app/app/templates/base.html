@@ -394,10 +394,97 @@ html.sidebar-expanded .menu-link .badge{display:inline-block}
   .mobile-menu{display:none!important}
 }
 
-/* System-wide warm dashboard theme from the supplied design reference. */
+/* Enhanced Refined Glassmorphism & Animated Liquid Backgrounds Layer */
 :root{
   --page:#f7f5ef;--card:#fffefa;--text:#30343a;--muted:#777b80;--border:#ece8df;
   --green-900:#714f18;--green-800:#9a6813;--green-700:#c27d0a;--green-500:#dda43b;
+  --gold:#c27d0a;--shadow:0 8px 30px rgba(48,52,58,0.06);--radius:16px;
+  --glass-bg:rgba(255,254,250,0.82);
+  --glass-border:rgba(236,232,223,0.9);
+  --glass-blur:blur(18px) saturate(180%);
+}
+[data-theme="dark"]{
+  --page:#161a1d;--card:#1e2428;--text:#f0f2f5;--muted:#9ba2ac;--border:#2b3339;
+  --green-900:#f3d28d;--green-800:#e5b858;--green-700:#c27d0a;--green-500:#dda43b;
+  --gold:#e5b858;--shadow:0 10px 35px rgba(0,0,0,0.28);
+  --glass-bg:rgba(30,36,40,0.82);
+  --glass-border:rgba(43,51,57,0.9);
+}
+
+/* Animated Liquid Backgrounds */
+body::before, body::after {
+  content: "";
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.28;
+  animation: muhuraLiquidFloat 20s ease-in-out infinite alternate;
+}
+body::before {
+  width: 50vw; height: 50vw;
+  top: -15vw; left: -10vw;
+  background: radial-gradient(circle, var(--green-500), var(--green-700));
+}
+body::after {
+  width: 45vw; height: 45vw;
+  bottom: -15vw; right: -10vw;
+  background: radial-gradient(circle, var(--gold), var(--green-800));
+  animation-delay: -10s;
+}
+@keyframes muhuraLiquidFloat {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(45px, 35px) scale(1.12); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body::before, body::after { animation: none !important; }
+}
+
+/* Refined Glassmorphism applied to Topbar, Cards, Panels, Modals, Dropdowns */
+.topbar {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--glass-border);
+  box-shadow: 0 4px 20px rgba(48,52,58,0.04);
+}
+.panel, .stat, .quick-link, .hero-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease;
+}
+.panel:hover, .stat:hover, .quick-link:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 36px rgba(48,52,58,0.09);
+  border-color: color-mix(in srgb, var(--green-700) 35%, var(--border));
+}
+.glass-shell {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: 24px;
+  box-shadow: 0 24px 60px rgba(48,52,58,0.12), inset 0 1px 0 rgba(255,255,255,0.4);
+}
+.account-popover, .account-edit > form, .dropdown-menu {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 16px 40px rgba(48,52,58,0.15);
+}
+
+/* Restrained Motion & Focus Accessibility */
+a, button, .btn, .menu-link {
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--green-700) 70%, white);
+  outline-offset: 2px;
+}
   --gold:#e89812;--shadow:0 3px 14px rgba(60,53,40,.045);--radius:15px;
   --bs-body-bg:var(--page);--bs-body-color:var(--text);--bs-primary:#df9012;--bs-primary-rgb:223,144,18;
   --bs-success:#758c68;--bs-success-rgb:117,140,104;--bs-info:#718a91;--bs-info-rgb:113,138,145;
@@ -900,6 +987,9 @@ document.addEventListener('DOMContentLoaded',()=>{
       sync();
     });
     optionObserver.observe(select,{childList:true,subtree:true,attributes:true,attributeFilter:['disabled','hidden','label','value']});
+    // Cascading dropdowns rebuild this select's options. Read the refreshed
+    // choice directly from the source instead of relying on a synthetic event.
+    select.addEventListener('change',()=>sync());
     sync();
   }
 

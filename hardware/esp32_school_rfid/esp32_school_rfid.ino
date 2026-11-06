@@ -1,568 +1,633 @@
-#include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <LiquidCrystal_I2C.h>
-#include <MFRC522.h>
-#include <NetworkClientSecure.h>
-#include <SPI.h>
+/*
+ * ============================================================================
+ *  Lycee Academics - ESP32 RFID student attendance reader
+ * ============================================================================
+ *
+ *  What it does
+ *  ------------
+ *  1. Reads a student's RFID card (MFRC522, 13.56 MHz).
+ *  2. Sends the card UID to the Flask app:  POST <SERVER_BASE_URL>/student/rfid-login
+ *     with header  X-Device-Token: <RFID_DEVICE_TOKEN>  and body {"uid":"A1B2C3D4"}.
+ *     The idle screen polls  GET <SERVER_BASE_URL>/student/rfid-status  every
+ *     IDLE_REFRESH_MS; both URLs are built from rfid_config.h.
+ *  3. The SERVER decides Present / Late / Absent from its own clock and the
+ *     saved Scan Times settings, records the attendance row, and answers.
+ *  4. The reader shows the result on three LEDs:
+ *
+ *        GREEN  = Present  (on time, inside the Present grace window)
+ *        YELLOW = Late     (inside the 15-minute late window)
+ *        RED    = Absent / denied / unknown card / network error
+ *
+ *     The LCD (optional) shows the student's name, class and status.
+ *
+ *  The reader never decides attendance itself - it only displays what the
+ *  server returned, so the app stays the single source of truth.
+ *
+ *  Libraries (Arduino IDE -> Tools -> Manage Libraries)
+ *  ----------------------------------------------------
+ *    - MFRC522            by GithubCommunity
+ *    - ArduinoJson        by Benoit Blanchon (v6 or v7)
+ *    - LiquidCrystal I2C  by Frank de Brabander   (only if LCD_ENABLED)
+ *    - ESP32 board package by Espressif (Boards Manager URL:
+ *      https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json)
+ *
+ *  Before uploading: copy rfid_config.h.example to rfid_config.h and edit it.
+ *  See hardware/README.md for the wiring diagram.
+ * ============================================================================
+ */
+
 #include <WiFi.h>
-#include <Wire.h>
-#include <esp_arduino_version.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <time.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <ArduinoJson.h>
 
+#if __has_include("rfid_config.h")
 #include "rfid_config.h"
-
-// HTTPS certificate-bundle support is required; never send the device token
-// over plain HTTP or disable certificate checks.
-#if !defined(ESP_ARDUINO_VERSION_MAJOR) || \
-    ESP_ARDUINO_VERSION_MAJOR < 3 || \
-    (ESP_ARDUINO_VERSION_MAJOR == 3 && ESP_ARDUINO_VERSION_MINOR < 3) || \
-    (ESP_ARDUINO_VERSION_MAJOR == 3 && ESP_ARDUINO_VERSION_MINOR == 3 && ESP_ARDUINO_VERSION_PATCH < 12)
-#error "Install Espressif ESP32 Arduino core 3.3.12 or newer for verified hosted HTTPS."
+#else
+#error "Missing rfid_config.h - copy rfid_config.h.example to rfid_config.h and fill in your values."
 #endif
 
-// Hosted Flask application. Leave RFID_CLASS_NAME blank in rfid_config.h for
-// multi-class scanning and school-wide aggregate LCD totals.
-const char *RFID_ENDPOINT = "https://smart-management-school.onrender.com/student/rfid-login";
-const char *RFID_STATUS_ENDPOINT = "https://smart-management-school.onrender.com/student/rfid-status";
+// Older rfid_config.h files do not define the server/status settings. Fall
+// back to the documented local defaults instead of failing to compile.
+#ifndef SERVER_BASE_URL
+const char *SERVER_BASE_URL = "http://192.168.1.182:5000";
+#endif
+#ifndef SERVER_USE_HTTPS
+const bool SERVER_USE_HTTPS = false;
+#endif
+#ifndef RFID_ENDPOINT_PATH
+const char *RFID_ENDPOINT_PATH = "/student/rfid-login";
+#endif
+#ifndef STATUS_ENDPOINT_PATH
+const char *STATUS_ENDPOINT_PATH = "/student/rfid-status";
+#endif
+#ifndef RFID_DEVICE_ID
+const char *RFID_DEVICE_ID = "MAIN_GATE_01";
+#endif
+#ifndef RFID_DEVICE_TOKEN
+const char *RFID_DEVICE_TOKEN = "";
+#endif
+#ifndef RFID_CLASS_NAME
+const char *RFID_CLASS_NAME = "";
+#endif
+#ifndef WIFI_TIMEOUT_MS
+const unsigned long WIFI_TIMEOUT_MS = 15000;
+#endif
+#ifndef WIFI_RETRY_MS
+const unsigned long WIFI_RETRY_MS = 10000;
+#endif
+#ifndef IDLE_REFRESH_MS
+const unsigned long IDLE_REFRESH_MS = 30000;
+#endif
+#ifndef LCD_ENABLED
+#define LCD_ENABLED 1
+#endif
 
+#if LCD_ENABLED
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27, 16, 2); // change 0x27 to 0x3F if the screen stays blank
+#endif
 
-// ESP32 DevKit + RC522 SPI reader.
-constexpr uint8_t RFID_SS_PIN = 5;
-constexpr uint8_t RFID_RST_PIN = 4;
-constexpr uint8_t RFID_SCK_PIN = 18;
-constexpr uint8_t RFID_MISO_PIN = 19;
-constexpr uint8_t RFID_MOSI_PIN = 23;
+// ------------------------------------------------------------------ Pins
+// Change these to match your wiring (see hardware/README.md).
+#define PIN_RC522_SS 5
+#define PIN_RC522_RST 4
+#define PIN_LED_GREEN 25
+#define PIN_LED_YELLOW 26
+#define PIN_LED_RED 27
+#define PIN_BUZZER 14 // optional, set to -1 if not fitted
 
-// I2C LCD. Change LCD_ADDRESS to 0x3F if that is your backpack's address.
-constexpr uint8_t LCD_SDA_PIN = 21;
-constexpr uint8_t LCD_SCL_PIN = 22;
-constexpr uint8_t LCD_ADDRESS = 0x27;
+// A define that is not defined (evaluated by #if) counts as 0 and would silently
+// disable the buzzer, so give it a real value.
+#ifndef PIN_BUZZER
+#define PIN_BUZZER -1
+#endif
 
-// Each LED needs its own 220-330 ohm series resistor.
-constexpr uint8_t LED_RED_PIN = 25;
-constexpr uint8_t LED_YELLOW_PIN = 26;
-constexpr uint8_t LED_GREEN_PIN = 27;
+// ------------------------------------------------------------------ State
+MFRC522 rfid(PIN_RC522_SS, PIN_RC522_RST);
 
-constexpr unsigned long CARD_REPEAT_GUARD_MS = 10000;
-constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
-constexpr unsigned long RFID_STATUS_POLL_MS = 30000;
-constexpr unsigned long LCD_IDLE_ROTATION_MS = 2800;
-constexpr uint8_t MAX_ABSENT_STUDENTS = 40;
-constexpr int RFID_ERROR_CLOCK_NOT_SYNCED = -1000;
+String lastUid = "";
+String statusHint = "";          // last status-poll reason reported by the server
+unsigned long lastUidAt = 0;
+unsigned long lastIdleRefresh = 0;
+unsigned long wifiRetryAt = 0;   // 0 = never attempted yet
 
-MFRC522 rfid(RFID_SS_PIN, RFID_RST_PIN);
-LiquidCrystal_I2C lcd(LCD_ADDRESS, 16, 2);
+// ============================================================================
+//  LED helpers
+// ============================================================================
+void ledsOff()
+{
+  digitalWrite(PIN_LED_GREEN, LOW);
+  digitalWrite(PIN_LED_YELLOW, LOW);
+  digitalWrite(PIN_LED_RED, LOW);
+}
 
-String lastUid;
-unsigned long lastUidReadAt = 0;
-unsigned long lastWifiRetryAt = 0;
-unsigned long lastStatusPollAt = 0;
-unsigned long lastIdleRenderAt = 0;
-unsigned long idleScreenNumber = 0;
-String absentStudents[MAX_ABSENT_STUDENTS];
-uint8_t absentStudentCount = 0;
-int statusAbsentCount = 0;
-String statusClassName;
-String statusSummaryLine = "Attendance pending";
-String statusPollError;
-bool systemClockReady = false;
-unsigned long lastClockSyncAttemptAt = 0;
+void showLed(int pin)
+{
+  ledsOff();
+  digitalWrite(pin, HIGH);
+}
 
-bool synchronizeSystemClock() {
-  if (time(nullptr) >= 1700000000) {
-    systemClockReady = true;
+void beep(int times, int onMs, int offMs)
+{
+#if PIN_BUZZER >= 0
+  for (int i = 0; i < times; i++)
+  {
+    digitalWrite(PIN_BUZZER, HIGH);
+    delay(onMs);
+    digitalWrite(PIN_BUZZER, LOW);
+    if (i < times - 1)
+      delay(offMs);
+  }
+#endif
+}
+
+// ============================================================================
+//  LCD helpers
+// ============================================================================
+void lcdLine(uint8_t row, const String &text)
+{
+#if LCD_ENABLED
+  String line = text;
+  if (line.length() > 16)
+    line = line.substring(0, 16);
+  while (line.length() < 16)
+    line += ' ';
+  lcd.setCursor(0, row);
+  lcd.print(line);
+#else
+  (void)row;
+  (void)text;
+#endif
+}
+
+void lcdShow(const String &top, const String &bottom)
+{
+  lcdLine(0, top);
+  lcdLine(1, bottom);
+}
+
+// ============================================================================
+//  Wi-Fi
+// ============================================================================
+bool connectWifi()
+{
+  if (WiFi.status() == WL_CONNECTED)
+    return true;
+
+  // This blocks for up to WIFI_TIMEOUT_MS. loop() runs every 50 ms, so only
+  // retry occasionally; otherwise an access point that is down freezes the
+  // reader and it never reads cards while reconnecting.
+  unsigned long now = millis();
+  if (wifiRetryAt != 0 && now - wifiRetryAt < WIFI_RETRY_MS)
+    return false;
+  wifiRetryAt = now;
+
+  Serial.printf("[wifi] connecting to %s", WIFI_SSID);
+  lcdShow("Connecting WiFi", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long started = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - started < WIFI_TIMEOUT_MS)
+  {
+    delay(500);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.printf("[wifi] connected, IP %s\n", WiFi.localIP().toString().c_str());
+    lcdShow("WiFi connected", WiFi.localIP().toString());
+    delay(800);
     return true;
   }
-  if (lastClockSyncAttemptAt > 0 &&
-      millis() - lastClockSyncAttemptAt < WIFI_RETRY_INTERVAL_MS * 6) {
-    return false;
-  }
-  lastClockSyncAttemptAt = millis();
-  configTime(0, 0, "pool.ntp.org", "time.google.com");
-  const unsigned long startedAt = millis();
-  while (time(nullptr) < 1700000000 && millis() - startedAt < 15000) {
-    delay(250);
-  }
-  systemClockReady = time(nullptr) >= 1700000000;
-  if (systemClockReady) {
-    Serial.println("System clock synchronized for HTTPS certificate checks.");
-  } else {
-    Serial.println("Clock sync failed; HTTPS requests are blocked until NTP succeeds.");
-  }
-  return systemClockReady;
+
+  Serial.println("[wifi] FAILED");
+  lcdShow("WiFi FAILED", "Check credentials");
+  showLed(PIN_LED_RED);
+  return false;
 }
 
-String statusErrorLabel(int httpCode) {
-  if (httpCode == HTTP_CODE_UNAUTHORIZED) return "401: bad token";
-  if (httpCode == HTTP_CODE_FORBIDDEN) return "403: access";
-  if (httpCode == HTTP_CODE_NOT_FOUND) return "404: no API";
-  if (httpCode == HTTP_CODE_SERVICE_UNAVAILABLE) return "503: set token";
-  if (httpCode == HTTP_CODE_BAD_GATEWAY) return "502: host error";
-  if (httpCode == HTTP_CODE_GATEWAY_TIMEOUT) return "504: host timeout";
-  if (httpCode >= 100) return String("HTTP ") + httpCode;
-  return "HTTPS/network";
-}
-
-void setLeds(bool red, bool yellow, bool green) {
-  digitalWrite(LED_RED_PIN, red ? HIGH : LOW);
-  digitalWrite(LED_YELLOW_PIN, yellow ? HIGH : LOW);
-  digitalWrite(LED_GREEN_PIN, green ? HIGH : LOW);
-}
-
-void showLine(uint8_t row, String value) {
-  if (value.length() > 16) {
-    value = value.substring(0, 16);
+// ============================================================================
+//  HTTP
+// ============================================================================
+void beginHttp(HTTPClient &http, WiFiClientSecure &secureClient, WiFiClient &plainClient,
+               const String &url)
+{
+  if (SERVER_USE_HTTPS)
+  {
+    // The school server uses a public certificate, so we do not pin a CA here.
+    // For a stricter setup, replace setInsecure() with:
+    //   secureClient.setCACert(ROOT_CA_PEM);
+    secureClient.setInsecure();
+    http.begin(secureClient, url);
   }
-  while (value.length() < 16) {
-    value += ' ';
+  else
+  {
+    http.begin(plainClient, url);
   }
-  lcd.setCursor(0, row);
-  lcd.print(value);
+  http.setTimeout(15000);
+  http.setConnectTimeout(10000);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Device-Token", RFID_DEVICE_TOKEN);
+  http.addHeader("X-Device-Id", RFID_DEVICE_ID);
 }
 
-void showMessage(const String &line1, const String &line2) {
-  showLine(0, line1);
-  showLine(1, line2);
+// Sends one card scan. Returns the HTTP status code (negative = transport error).
+int postScan(const String &uid, String &responseBody)
+{
+  WiFiClientSecure secureClient;
+  WiFiClient plainClient;
+  HTTPClient http;
+
+  String url = String(SERVER_BASE_URL) + RFID_ENDPOINT_PATH;
+  beginHttp(http, secureClient, plainClient, url);
+
+  JsonDocument doc;
+  doc["uid"] = uid;
+  doc["device_id"] = RFID_DEVICE_ID;
+  String payload;
+  serializeJson(doc, payload);
+
+  Serial.printf("[scan] POST %s  %s\n", url.c_str(), payload.c_str());
+  int code = http.POST(payload);
+  responseBody = (code > 0) ? http.getString() : "";
+  http.end();
+
+  Serial.printf("[scan] HTTP %d  %s\n", code, responseBody.c_str());
+  return code;
 }
 
-String urlEncode(const String &value) {
-  const char hex[] = "0123456789ABCDEF";
+String urlEncode(const String &value)
+{
+  static const char hex[] = "0123456789ABCDEF";
   String encoded;
-  for (size_t i = 0; i < value.length(); i++) {
-    const uint8_t c = static_cast<uint8_t>(value[i]);
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-      encoded += static_cast<char>(c);
-    } else {
+  encoded.reserve(value.length() * 3);
+  for (size_t i = 0; i < value.length(); i++)
+  {
+    char c = value.charAt(i);
+    if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~')
+    {
+      encoded += c;
+    }
+    else
+    {
       encoded += '%';
-      encoded += hex[c >> 4];
+      encoded += hex[(c >> 4) & 0x0F];
       encoded += hex[c & 0x0F];
     }
   }
   return encoded;
 }
 
-bool refreshClassStatus() {
-  if (WiFi.status() != WL_CONNECTED) {
-    statusPollError = "Wi-Fi offline";
-    Serial.println("Attendance status poll skipped: Wi-Fi is offline.");
-    return false;
-  }
-  if (!systemClockReady && !synchronizeSystemClock()) {
-    statusPollError = "Clock not synced";
-    return false;
-  }
-  if (String(RFID_DEVICE_TOKEN).length() == 0 ||
-      String(RFID_DEVICE_TOKEN).startsWith("SET_THE_SAME")) {
-    statusPollError = "Set device token";
-    Serial.println("Attendance status poll disabled: set RFID_DEVICE_TOKEN in the sketch and .env.");
-    return false;
-  }
-  NetworkClientSecure client;
-  client.useBuiltinCACertBundle();
+// Polls the class/school counters for the idle screen.
+// Returns the HTTP status code (200 = success, negative = transport error).
+int fetchStatus(String &line1, String &line2)
+{
+  WiFiClientSecure secureClient;
+  WiFiClient plainClient;
   HTTPClient http;
-  http.setConnectTimeout(15000);
-  http.setTimeout(45000);
-  String url = RFID_STATUS_ENDPOINT;
-  if (String(RFID_CLASS_NAME).length() > 0) {
-    url += "?class=" + urlEncode(RFID_CLASS_NAME);
-  }
-  if (!http.begin(client, url)) {
-    statusPollError = "HTTPS begin fail";
-    Serial.println("Attendance status poll failed to initialize HTTPS. Check the server URL and ESP32 board package.");
-    return false;
-  }
-  http.addHeader("X-Device-Token", RFID_DEVICE_TOKEN);
-  const int httpCode = http.GET();
-  if (httpCode != HTTP_CODE_OK) {
-    const String errorBody = http.getString();
-    statusPollError = statusErrorLabel(httpCode);
-    if (httpCode < 0) {
-      Serial.printf("Class status HTTPS/network request failed: %s (%d): %s\n",
-                    http.errorToString(httpCode).c_str(), httpCode, errorBody.c_str());
-    } else {
-      Serial.printf("Class status request failed: HTTP %d: %s\n",
-                    httpCode, errorBody.c_str());
-    }
-    http.end();
-    return false;
-  }
 
-  DynamicJsonDocument statusDocument(4096);
-  const DeserializationError parseError = deserializeJson(statusDocument, http.getString());
+  String url = String(SERVER_BASE_URL) + STATUS_ENDPOINT_PATH;
+  // Must be a percent-encoded query value ("Class 7A" -> "Class%207A").
+  String deviceClass = String(RFID_CLASS_NAME);
+  deviceClass.trim();
+  if (deviceClass.length() > 0)
+  {
+    url += "?class=";
+    url += urlEncode(deviceClass);
+  }
+  beginHttp(http, secureClient, plainClient, url);
+
+  Serial.printf("[status] GET %s\n", url.c_str());
+  int code = http.GET();
+  String body = (code > 0) ? http.getString() : "";
   http.end();
-  if (parseError || String(statusDocument["status"] | "") != "success") {
-    statusPollError = "Bad server reply";
-    Serial.printf("Could not parse class status response: %s\n", parseError.c_str());
-    return false;
-  }
-
-  statusPollError = "";
-  statusClassName = statusDocument["class_name"] | "All classes";
-  JsonObject summary = statusDocument["class_summary"].as<JsonObject>();
-  const int presentPercent = summary["present_percent"] | 0;
-  const int latePercent = summary["late_percent"] | 0;
-  const int absentPercent = summary["absent_percent"] | 0;
-  statusAbsentCount = summary["absent_count"] | 0;
-  statusSummaryLine = String("P") + presentPercent + "%L" + latePercent + "%A" + absentPercent + "%";
-
-  absentStudentCount = 0;
-  JsonArray names = statusDocument["absent_students"].as<JsonArray>();
-  for (JsonVariant name : names) {
-    if (absentStudentCount >= MAX_ABSENT_STUDENTS) {
-      break;
+  if (code != 200)
+  {
+    Serial.printf("[status] HTTP %d  %s\n", code, body.c_str());
+    // Show the server's own hint (e.g. reason=server_token_missing) on the LCD
+    // so the fix is visible without opening Serial Monitor.
+    statusHint = "";
+    JsonDocument errDoc;
+    if (deserializeJson(errDoc, body) == DeserializationError::Ok)
+    {
+      String reason = errDoc["reason"] | "";
+      if (reason.length())
+        statusHint = reason;
     }
-    absentStudents[absentStudentCount++] = name.as<String>();
+    return code == 0 ? -1 : code;
   }
-  idleScreenNumber = 0;
-  lastIdleRenderAt = 0;
-  const String updatedAt = statusDocument["updated_at"] | "time unavailable";
-  const int absencesRecorded = statusDocument["absences_recorded"] | 0;
-  Serial.printf("Attendance scope %s updated at %s: %u listed absent student(s); %s; %d new absence(s) saved\n",
-                statusClassName.c_str(), updatedAt.c_str(), absentStudentCount,
-                statusSummaryLine.c_str(), absencesRecorded);
-  if (absencesRecorded > 0) {
-    Serial.println("The server saved the absences and queued in-app attendance alerts.");
+
+  JsonDocument doc;
+  if (deserializeJson(doc, body) != DeserializationError::Ok)
+  {
+    Serial.printf("[status] invalid JSON: %s\n", body.c_str());
+    return -2;
   }
-  return true;
+
+  JsonObject summary = doc["class_summary"];
+  if (summary.isNull())
+  {
+    Serial.printf("[status] missing class_summary: %s\n", body.c_str());
+    return -3;
+  }
+
+  String name = doc["class_name"] | "All classes";
+  line1 = name;
+  line2 = "P:" + String((int)(summary["present_count"] | 0)) +
+          " L:" + String((int)(summary["late_count"] | 0)) +
+          " A:" + String((int)(summary["absent_count"] | 0));
+  Serial.printf("[status] %s  %s\n", line1.c_str(), line2.c_str());
+  return 200;
 }
 
-void renderIdleClassStatus() {
-  if (statusClassName.length() == 0) {
-    if (statusPollError.length() > 0) {
-      showMessage("Class sync issue", statusPollError);
-    } else {
-      showMessage("School RFID", "Tap student card");
-    }
-    return;
-  }
-  if (millis() - lastIdleRenderAt < LCD_IDLE_ROTATION_MS) {
-    return;
-  }
-  lastIdleRenderAt = millis();
+// ============================================================================
+//  Result handling
+// ============================================================================
+void showResult(const String &uid, int code, const String &body)
+{
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, body);
+  const char *status = err ? "" : (doc["status"] | "");
+  const char *attendance = err ? "" : (doc["attendance_status"] | "");
+  String student = err ? "" : String((const char *)(doc["student"] | ""));
+  String className = err ? "" : String((const char *)(doc["class_name"] | ""));
+  String message = err ? "" : String((const char *)(doc["message"] | ""));
 
-  if (absentStudentCount == 0) {
-    if (statusAbsentCount == 0) {
-      showMessage(statusClassName, statusSummaryLine);
-      setLeds(false, false, false);
-    } else if (idleScreenNumber % 2 == 0) {
-      showMessage(statusClassName, statusSummaryLine);
-      setLeds(false, false, false);
-    } else {
-      showMessage("ABSENT", String("Students: ") + statusAbsentCount);
-      setLeds(true, false, false);
-    }
-    idleScreenNumber++;
+  // ---- Present -----------------------------------------------------------
+  if (code == 200 && strcmp(status, "success") == 0 && strcmp(attendance, "Present") == 0)
+  {
+    showLed(PIN_LED_GREEN);
+    beep(1, 120, 0);
+    lcdShow(student.length() ? student : "Present", "PRESENT " + className);
+    Serial.printf("[result] PRESENT %s\n", student.c_str());
     return;
   }
 
-  const uint8_t slot = idleScreenNumber % 6;
-  if (slot == 0) {
-    showMessage(statusClassName, statusSummaryLine);
-    setLeds(false, false, false);
-  } else {
-    const uint8_t groupOffset = ((idleScreenNumber / 6) * 5) % absentStudentCount;
-    const uint8_t studentIndex = (groupOffset + slot - 1) % absentStudentCount;
-    showMessage(absentStudents[studentIndex], "ABSENT");
-    setLeds(true, false, false);
+  // ---- Late --------------------------------------------------------------
+  if (code == 200 && strcmp(status, "success") == 0 && strcmp(attendance, "Late") == 0)
+  {
+    showLed(PIN_LED_YELLOW);
+    beep(2, 90, 90);
+    lcdShow(student.length() ? student : "Late", "LATE " + className);
+    Serial.printf("[result] LATE %s\n", student.c_str());
+    return;
   }
-  idleScreenNumber++;
+
+  // ---- Afternoon check-in (attendance already decided in the morning) ----
+  // The server answers with attendance_status "Absent" and a note such as
+  // "attendance remains Absent because the 15-minute morning late-arrival
+  // grace period ended", so this must not light green.
+  if (code == 200 && strcmp(status, "success") == 0)
+  {
+    if (strcmp(attendance, "Absent") == 0)
+    {
+      showLed(PIN_LED_RED);
+      beep(3, 250, 120);
+      lcdShow(student.length() ? student : "Checked in", "ABSENT - too late");
+      Serial.printf("[result] ABSENT (afternoon scan) %s\n", student.c_str());
+      return;
+    }
+    showLed(PIN_LED_GREEN);
+    beep(1, 120, 0);
+    lcdShow(student.length() ? student : "Checked in", "CHECKED IN " + className);
+    Serial.printf("[result] CHECKED IN %s\n", student.c_str());
+    return;
+  }
+
+  // ---- Meeting check-in --------------------------------------------------
+  if (code == 200 && strcmp(status, "meeting_checkin") == 0)
+  {
+    showLed(PIN_LED_GREEN);
+    beep(1, 120, 0);
+    lcdShow(student.length() ? student : "Meeting", "MEETING CHECK-IN");
+    return;
+  }
+
+  // ---- Absent / access denied -------------------------------------------
+  if (strcmp(status, "access_denied") == 0)
+  {
+    showLed(PIN_LED_RED);
+    beep(3, 250, 120);
+    lcdShow(student.length() ? student : "Access denied", "ABSENT - too late");
+    Serial.printf("[result] ABSENT (access denied) %s\n", student.c_str());
+    return;
+  }
+
+  // ---- Card not registered yet ------------------------------------------
+  if (code == 202 && strcmp(status, "pending_registration") == 0)
+  {
+    showLed(PIN_LED_RED);
+    beep(2, 200, 150);
+    lcdShow("New card", "Register in app");
+    Serial.printf("[result] PENDING REGISTRATION %s\n", uid.c_str());
+    return;
+  }
+
+  // ---- Lost / inactive / wrong class ------------------------------------
+  if (strcmp(status, "lost_card") == 0 || strcmp(status, "student_inactive") == 0 ||
+      strcmp(status, "class_not_allowed") == 0 || strcmp(status, "card_not_eligible") == 0)
+  {
+    showLed(PIN_LED_RED);
+    beep(3, 250, 120);
+    lcdShow("Card rejected", message.length() ? message : String(status));
+    Serial.printf("[result] REJECTED %s\n", status);
+    return;
+  }
+
+  // ---- Outside the scan windows -----------------------------------------
+  if (strcmp(status, "outside_window") == 0)
+  {
+    showLed(PIN_LED_RED);
+    beep(2, 200, 150);
+    lcdShow(student.length() ? student : "Outside window", "No scan window");
+    return;
+  }
+
+  // ---- Device token / server problems -----------------------------------
+  if (code == 401)
+  {
+    showLed(PIN_LED_RED);
+    beep(4, 120, 80);
+    lcdShow("Device token", "rejected (401)");
+    return;
+  }
+  if (code == 503)
+  {
+    showLed(PIN_LED_RED);
+    beep(2, 200, 150);
+    lcdShow("Server busy", "Try again");
+    return;
+  }
+
+  // ---- Anything else (network error, bad JSON, ...) ---------------------
+  showLed(PIN_LED_RED);
+  beep(3, 250, 120);
+  lcdShow("No connection", code > 0 ? "HTTP " + String(code) : "Network error");
+  Serial.printf("[result] UNHANDLED code=%d body=%s\n", code, body.c_str());
 }
 
-String readUid() {
-  String uid;
-  uid.reserve(rfid.uid.size * 2);
-  for (byte i = 0; i < rfid.uid.size; i++) {
-    if (rfid.uid.uidByte[i] < 0x10) {
+// ============================================================================
+//  Card reading
+// ============================================================================
+String readCardUid()
+{
+  if (!rfid.PICC_IsNewCardPresent())
+    return "";
+  if (!rfid.PICC_ReadCardSerial())
+    return "";
+
+  String uid = "";
+  for (byte i = 0; i < rfid.uid.size; i++)
+  {
+    if (rfid.uid.uidByte[i] < 0x10)
       uid += '0';
-    }
     uid += String(rfid.uid.uidByte[i], HEX);
   }
   uid.toUpperCase();
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
   return uid;
 }
 
-void beginWifi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+void handleCard(const String &uid)
+{
+  unsigned long now = millis();
+  if (uid == lastUid && now - lastUidAt < CARD_DEBOUNCE_MS)
+    return; // same tap
+  lastUid = uid;
+  lastUidAt = now;
 
-  showMessage("Connecting WiFi", WIFI_SSID);
-  Serial.print("Connecting to Wi-Fi");
-  const unsigned long startedAt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 20000) {
+  lcdShow("Card " + uid, "Checking...");
+  ledsOff();
+
+  if (!connectWifi())
+  {
+    showResult(uid, -1, "");
+    return;
+  }
+
+  String body;
+  int code = postScan(uid, body);
+  showResult(uid, code, body);
+}
+
+// ============================================================================
+//  Setup / loop
+// ============================================================================
+void setup()
+{
+  Serial.begin(115200);
+  delay(200);
+  Serial.println();
+  Serial.println("Lycee Academics RFID reader starting...");
+
+  pinMode(PIN_LED_GREEN, OUTPUT);
+  pinMode(PIN_LED_YELLOW, OUTPUT);
+  pinMode(PIN_LED_RED, OUTPUT);
+#if PIN_BUZZER >= 0
+  pinMode(PIN_BUZZER, OUTPUT);
+#endif
+  // A GPIO used as a pin cannot be driven by the disabled-channel trick, so
+  // disable the buzzer in rfid_config.h if no buzzer is fitted.
+#if PIN_BUZZER >= 0
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+#endif
+  ledsOff();
+
+#if LCD_ENABLED
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+#endif
+  lcdShow("Lycee Academics", "Starting...");
+
+  SPI.begin();
+  rfid.PCD_Init();
+  delay(50);
+  byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  Serial.printf("[rfid] MFRC522 version 0x%02X\n", version);
+  if (version == 0x00 || version == 0xFF)
+  {
+    Serial.println("[rfid] WARNING: reader not detected - check SPI wiring and 3.3V power.");
+    lcdShow("Reader missing", "Check wiring");
+    showLed(PIN_LED_RED);
+  }
+
+  connectWifi();
+  syncClock();
+  lastIdleRefresh = 0;
+  // Counters load on the first loop() pass instead of behind a cold HTTPS handshake.
+}
+
+// HTTPS certificate validation needs a correct clock. Plain HTTP is not
+// affected, so a failed sync only matters when SERVER_USE_HTTPS is true.
+void syncClock()
+{
+  if (!SERVER_USE_HTTPS || WiFi.status() != WL_CONNECTED)
+    return;
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  Serial.print("[time] syncing clock");
+  for (int i = 0; i < 20 && time(nullptr) < 1700000000; i++)
+  {
     delay(500);
     Serial.print('.');
   }
   Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("Wi-Fi IP: ");
-    Serial.println(WiFi.localIP());
-    showMessage("WiFi connected", WiFi.localIP().toString());
-    setLeds(false, false, true);
-    synchronizeSystemClock();
-    delay(1500);
-    setLeds(false, false, false);
-    showMessage("School RFID", "Tap student card");
-  } else {
-    Serial.println("Wi-Fi connection failed. Will retry in the background.");
-    setLeds(true, false, false);
-    showMessage("WiFi unavailable", "Check settings");
-  }
 }
 
-void keepWifiConnected() {
-  if (WiFi.status() == WL_CONNECTED) {
-    if (!systemClockReady) {
-      synchronizeSystemClock();
-    }
+void loop()
+{
+  // Keep the link alive; reconnect quietly if the AP dropped us.
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    connectWifi();
+  }
+
+  String uid = readCardUid();
+  if (uid.length() > 0)
+  {
+    handleCard(uid);
+    lastIdleRefresh = 0; // refresh counters right after a scan
     return;
   }
 
-  if (millis() - lastWifiRetryAt >= WIFI_RETRY_INTERVAL_MS) {
-    lastWifiRetryAt = millis();
-    Serial.println("Retrying Wi-Fi...");
-    WiFi.reconnect();
-  }
-}
-
-int postRfidUid(const String &uid, String &responseBody) {
-  if (WiFi.status() != WL_CONNECTED) {
-    return -1;
-  }
-  if (!systemClockReady && !synchronizeSystemClock()) {
-    return RFID_ERROR_CLOCK_NOT_SYNCED;
-  }
-
-  NetworkClientSecure client;
-  client.useBuiltinCACertBundle();
-  HTTPClient http;
-  http.setConnectTimeout(15000);
-  http.setTimeout(45000);
-
-  if (!http.begin(client, RFID_ENDPOINT)) {
-    Serial.println("Could not start HTTP request. Check RFID_ENDPOINT.");
-    return -1;
-  }
-
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Device-Token", RFID_DEVICE_TOKEN);
-  StaticJsonDocument<96> requestDocument;
-  requestDocument["uid"] = uid;
-  String payload;
-  serializeJson(requestDocument, payload);
-  Serial.printf("[RFID] POST %s\n", RFID_ENDPOINT);
-  Serial.printf("[RFID] Request JSON: %s\n", payload.c_str());
-
-  const int httpCode = http.POST(payload);
-  if (httpCode > 0) {
-    responseBody = http.getString();
-  } else {
-    Serial.printf("HTTPS RFID request failed: %s (%d)\n",
-                  http.errorToString(httpCode).c_str(), httpCode);
-  }
-  http.end();
-  return httpCode;
-}
-
-void showServerResult(int httpCode, const String &responseBody) {
-  Serial.printf("[RFID] HTTP %d response:\n%s\n", httpCode, responseBody.c_str());
-
-  if (httpCode <= 0) {
-    setLeds(true, false, false);
-    if (httpCode == RFID_ERROR_CLOCK_NOT_SYNCED) {
-      showMessage("Clock not synced", "Check NTP/WiFi");
-    } else {
-      showMessage("HTTPS/network", "See Serial log");
-    }
-    return;
-  }
-
-  DynamicJsonDocument result(1536);
-  const DeserializationError parseError = deserializeJson(result, responseBody);
-  if (parseError) {
-    setLeds(true, false, false);
-    if (httpCode > 0) {
-      showMessage("Server HTTP error", String("Code ") + httpCode);
-    } else {
-      showMessage("Bad server reply", "See Serial log");
-    }
-    return;
-  }
-
-  const String status = result["status"] | "unknown";
-  const String student = result["student"] | "";
-  const String attendance = result["attendance_status"] | "";
-  String attendanceLabel = attendance;
-  attendanceLabel.toUpperCase();
-  const String timestamp = result["timestamp"] | "";
-  const String message = result["message"] | "Request failed";
-
-  if (status == "device_unauthorized") {
-    setLeds(true, false, false);
-    showMessage("Device not auth", "Check token");
-    Serial.println("RFID scan rejected: configure the same RFID_DEVICE_TOKEN on the server and ESP32.");
-    return;
-  }
-
-  if (status == "student_inactive") {
-    setLeds(true, false, false);
-    showMessage(student.length() > 0 ? student : "Student account", "INACTIVE: OFFICE");
-    Serial.println("RFID scan denied: this card belongs to an archived student account.");
-    return;
-  }
-
-  if (status == "class_not_allowed") {
-    setLeds(true, false, false);
-    showMessage("Class not allowed", "Check reader setup");
-    Serial.println("RFID scan rejected: student's class is outside RFID_DEVICE_CLASS on the server.");
-    return;
-  }
-
-  if (status == "success" || status == "meeting_checkin") {
-    if (attendance == "Present") {
-      setLeds(false, false, true);
-    } else if (attendance == "Late") {
-      setLeds(false, true, false);
-    } else if (attendance == "Absent") {
-      setLeds(true, false, false);
-    } else {
-      setLeds(false, false, true);
-    }
-    if (student.length() > 0 && attendance.length() > 0) {
-      showMessage(student, attendanceLabel);
-      delay(2200);
-    } else if (student.length() > 0) {
-      showMessage("Meeting check-in", student);
-      delay(2200);
-    } else {
-      showMessage("Scan accepted", message);
-      delay(2200);
-    }
-
-    if (timestamp.length() >= 19) {
-      showMessage(String("Date ") + timestamp.substring(0, 10),
-                  String("Time ") + timestamp.substring(11, 19));
-      delay(1600);
-    }
-
-    const String className = result["class_name"] | "Unassigned";
-    JsonObject summary = result["class_summary"].as<JsonObject>();
-    if (!summary.isNull()) {
-      const int presentPercent = summary["present_percent"] | 0;
-      const int latePercent = summary["late_percent"] | 0;
-      const int absentPercent = summary["absent_percent"] | 0;
-      const int unmarkedCount = summary["unmarked_count"] | 0;
-
-      showMessage(className,
-                  String("P") + presentPercent + "%L" + latePercent + "%A" + absentPercent + "%");
-      delay(2800);
-
-      if (unmarkedCount > 0) {
-        showMessage("Not marked yet:", String("Students: ") + unmarkedCount);
-        delay(1800);
+  // Idle screen: class/school counters, refreshed periodically.
+  if (millis() - lastIdleRefresh > IDLE_REFRESH_MS)
+  {
+    lastIdleRefresh = millis();
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      String line1, line2;
+      int statusCode = fetchStatus(line1, line2);
+      if (statusCode == 200)
+      {
+        lcdShow(line1, line2);
+      }
+      else
+      {
+        // Surface why the status poll failed: 401 token mismatch,
+        // 503 RFID_DEVICE_TOKEN missing on the server, 403 class mismatch,
+        // 404 wrong path/address, <0 Wi-Fi/DNS/TLS problem.
+        Serial.printf("[status] sync failed (HTTP %d) via %s %s\n",
+                      statusCode, SERVER_BASE_URL, statusHint.c_str());
+        lcdShow("Class sync issue", statusHint.length() ? statusHint : "HTTP " + String(statusCode));
       }
     }
-    return;
-  }
-
-  if (status == "pending_registration") {
-    setLeds(false, true, false);
-    showMessage("Card not linked", "Queued for office");
-    return;
-  }
-
-  setLeds(true, false, false);
-  if (status == "access_denied") {
-    showMessage(student.length() > 0 ? student : "ACCESS DENIED", "ACCESS DENIED");
-    delay(2200);
-  } else if (status == "outside_window") {
-    showMessage("Outside scan", "time window");
-    delay(1800);
-    const String className = result["class_name"] | "Unassigned";
-    JsonObject summary = result["class_summary"].as<JsonObject>();
-    if (!summary.isNull()) {
-      const int presentPercent = summary["present_percent"] | 0;
-      const int latePercent = summary["late_percent"] | 0;
-      const int absentPercent = summary["absent_percent"] | 0;
-      showMessage(className,
-                  String("P") + presentPercent + "%L" + latePercent + "%A" + absentPercent + "%");
-      delay(2800);
+    else
+    {
+      lcdShow("No WiFi", "Tap card to retry");
     }
-  } else if (status == "lost_card" || status == "card_not_eligible") {
-    showMessage("Card not allowed", "Contact office");
-  } else {
-    showMessage("Scan rejected", message);
   }
-}
 
-void setup() {
-  Serial.begin(115200);
-
-  pinMode(LED_RED_PIN, OUTPUT);
-  pinMode(LED_YELLOW_PIN, OUTPUT);
-  pinMode(LED_GREEN_PIN, OUTPUT);
-  setLeds(false, false, false);
-
-  Wire.begin(LCD_SDA_PIN, LCD_SCL_PIN);
-  lcd.init();
-  lcd.backlight();
-  showMessage("School RFID", "Starting...");
-
-  SPI.begin(RFID_SCK_PIN, RFID_MISO_PIN, RFID_MOSI_PIN, RFID_SS_PIN);
-  rfid.PCD_Init();
   delay(50);
-
-  beginWifi();
-  lastStatusPollAt = millis() - RFID_STATUS_POLL_MS;
-}
-
-void loop() {
-  keepWifiConnected();
-
-  if (millis() - lastStatusPollAt >= RFID_STATUS_POLL_MS) {
-    lastStatusPollAt = millis();
-    refreshClassStatus();
-  }
-
-  renderIdleClassStatus();
-
-  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
-    delay(20);
-    return;
-  }
-
-  const String uid = readUid();
-  rfid.PICC_HaltA();
-  rfid.PCD_StopCrypto1();
-
-  if (uid == lastUid && millis() - lastUidReadAt < CARD_REPEAT_GUARD_MS) {
-    delay(50);
-    return;
-  }
-  lastUid = uid;
-  lastUidReadAt = millis();
-
-  Serial.printf("Card read: %s\n", uid.c_str());
-  if (WiFi.status() != WL_CONNECTED) {
-    setLeds(true, false, false);
-    showMessage("Card read", "WiFi offline");
-    delay(1800);
-    lastUidReadAt = millis();
-    showMessage("School RFID", "Tap student card");
-    return;
-  }
-
-  setLeds(false, true, false);
-  showMessage("Sending card...", uid);
-  String responseBody;
-  const int httpCode = postRfidUid(uid, responseBody);
-  showServerResult(httpCode, responseBody);
-  // Start the repeat guard after the response has finished displaying so a held
-  // or immediately re-tapped card cannot flood the Flask endpoint.
-  lastUidReadAt = millis();
-
-  setLeds(false, false, false);
-  lastIdleRenderAt = 0;
 }

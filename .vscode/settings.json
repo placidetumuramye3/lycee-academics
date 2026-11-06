@@ -1,3 +1,5 @@
 {
-    "python.terminal.useEnvFile": true
+    "python.terminal.useEnvFile": true,
+    "CodeGPT.apiKey": "CodeGPT Plus Beta",
+    "Codegeex.RepoIndex": true
 }

@@ -88,6 +88,7 @@ ROLE_ACCESS = {
     "assessment_file": {"master_admin", "teacher", "student", "parent"},
     "assessment_submission_file": {"master_admin", "teacher", "student", "parent"},
     "classes_modules": {"master_admin", "head_teacher", "teacher", "accountant", "librarian", "discipline", "patron", "matron", "secretary", "parent", "student", "auditor"},
+    "classes_modules_edit": {"master_admin", "head_teacher", "secretary"},
     "welfare": {"master_admin", "head_teacher", "patron", "matron"},
     "welfare_search": {"master_admin", "head_teacher", "patron", "matron"},
     "welfare_create": {"patron", "matron"},

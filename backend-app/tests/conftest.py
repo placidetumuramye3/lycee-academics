@@ -7,6 +7,8 @@ class TestConfig:
     SECRET_KEY="test"
     SQLALCHEMY_DATABASE_URI="sqlite:///:memory:"
     SQLALCHEMY_TRACK_MODIFICATIONS=False
+    # Tests control their own academic seeding for isolation.
+    SKIP_ACADEMIC_SEEDING=True
 
 @pytest.fixture
 def app():

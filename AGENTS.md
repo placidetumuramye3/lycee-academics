@@ -53,7 +53,7 @@ npm.cmd run build --prefix react-frontend
 
 ## Security and config
 
-- Keep secrets and local environment values in `.env`; use `.env.example` as the documented template.
+- Keep secrets and local environment values in `backend-app/.env`; use `backend-app/.env.example` as the documented template.
 - Do not commit credentials, local sqlite files, or virtual environments.
 - Treat the bootstrap admin credentials in the documentation as local development values only and rotate or replace them immediately in real deployments.
 

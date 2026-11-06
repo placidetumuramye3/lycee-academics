@@ -75,7 +75,7 @@ The app initializes through `backend-app/app/__init__.py` and upgrades legacy SQ
 - For meeting-related work, consult the meeting API and schema docs before changing endpoints or security assumptions.
 
 ## Security and configuration notes
-- Keep secrets and local environment values in `.env`; use `.env.example` as the template.
+- Keep secrets and local environment values in `backend-app/.env`; use `backend-app/.env.example` as the template.
 - Do not commit credentials, local SQLite databases, or virtual environments.
 - Treat bootstrap admin credentials in the docs as development-only values and rotate or replace them immediately in deployments.
 - The app uses school-scoped access control and role checks in the backend; ensure changes respect those boundaries.

@@ -32,6 +32,13 @@ from app.services.attendance_service import (
 from app.services.room_booking import check_in_student_for_current_meetings
 
 
+# Exact path the ESP32 polls. Kept here so the alias route and the error
+# message cannot drift apart from register_routes().
+RFID_STATUS_PATH = "/student/rfid-status"
+# Common copy/paste mistakes: a leading space in the path ("/ student/...").
+RFID_STATUS_PATH_ALIASES = ("/ student/rfid-status",)
+
+
 def _rfid_device_token_error():
     """Enforce the configured device token while preserving legacy setups without one."""
     expected_token = str(current_app.config.get("RFID_DEVICE_TOKEN", "") or "")
@@ -44,11 +51,32 @@ def _rfid_device_token_error():
 
 
 def rfid_class_status():
-    """Return a configured class summary or school-wide aggregate to the RFID display."""
+    """Return a configured class summary or school-wide aggregate to the RFID display.
+
+    The reader calls ``GET <SERVER_BASE_URL>/student/rfid-status``. If someone
+    typed the path as ``"/ student/rfid-status"`` (leading space), the router
+    cannot match the route, so the alias route also serves it and answers with
+    the exact fix instead of a generic 404.
+    """
     expected_token = str(current_app.config.get("RFID_DEVICE_TOKEN", "") or "")
     allowed_class = str(current_app.config.get("RFID_DEVICE_CLASS", "") or "").strip()
+    if request.path != RFID_STATUS_PATH:
+        return jsonify(
+            status="error",
+            message="Wrong status URL: remove the space in the path. Use "
+                    "RFID_STATUS_PATH=%s (i.e. SERVER_BASE_URL + \"/student/rfid-status\")."
+                    % RFID_STATUS_PATH,
+        ), 404
     if not expected_token:
-        return jsonify(status="error", message="RFID status display is not configured."), 503
+        current_app.logger.warning(
+            "RFID status request rejected with 503: RFID_DEVICE_TOKEN is empty on the server.")
+        return jsonify(
+            status="error",
+            reason="server_token_missing",
+            message="RFID_DEVICE_TOKEN is empty on the server. Add it to the .env file "
+                    "next to config.py and restart the app, then use the same value "
+                    "in rfid_config.h.",
+        ), 503
     token_error = _rfid_device_token_error()
     if token_error:
         return token_error
@@ -66,20 +94,29 @@ def rfid_class_status():
         class_name = "All classes"
 
     now = datetime.datetime.now()
+    absences_recorded = []
     try:
         absences_recorded = reconcile_daily_absences(now=now)
         db.session.commit()
     except Exception:
+        # Recording today's absences is a background duty of the poll. A
+        # transient failure must not stop the reader from showing counters:
+        # roll back and still answer with the current attendance summary.
         db.session.rollback()
         current_app.logger.exception("RFID class-status reconciliation failed")
-        return jsonify(status="error", message="Attendance status is temporarily unavailable."), 503
 
     today = now.date().isoformat()
-    summary = (
-        class_attendance_summary(allowed_class, today)
-        if allowed_class else school_attendance_summary(today)
-    )
-    absent_students = class_absent_student_names(allowed_class, today) if allowed_class else []
+    try:
+        summary = (
+            class_attendance_summary(allowed_class, today)
+            if allowed_class else school_attendance_summary(today)
+        )
+        absent_students = class_absent_student_names(allowed_class, today) if allowed_class else []
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("RFID class-status summary failed")
+        return jsonify(status="error", reason="summary_unavailable",
+                       message="Attendance status is temporarily unavailable."), 503
     return jsonify(
         status="success",
         class_name=class_name,
@@ -95,7 +132,10 @@ def rfid_login():
             grace_minutes = get_present_grace_minutes()
         except ValueError:
             grace_minutes = DEFAULT_PRESENT_GRACE_MINUTES
-        return page("RFID Scanner Endpoint", f"""<section class="panel"><h1>RFID <span class="accent">Scanner API Endpoint</span></h1><p>Connect the RFID reader controller to <code>POST /student/rfid-login</code> with JSON such as <code>{{"uid": "A1B2C3D4"}}</code> or <code>{{"rfid_card_uid": "A1B2C3D4"}}</code>.</p><p class="muted">The server clock and saved Scan Times settings determine each result; the ESP32 sends the card UID. Scans through the configured {grace_minutes}-minute Present grace after the allowed time ends are Present. Later scans through 15 minutes after the deadline are Late. After 15 minutes, the endpoint returns Access Denied and keeps the student Absent; the configured afternoon scan window remains available. The ESP32's protected status poll, staff opening Attendance, or the scheduled attendance reconciliation command queues in-app alerts for newly absent students, guardians, and authorized staff. Late scans queue alerts immediately. Parent email and SMS alerts also require configured providers.</p><p>Configure the same RFID_DEVICE_TOKEN in the server environment and ESP32 sketch to authenticate requests. Leave RFID_DEVICE_CLASS blank to let each scanned card use its registered student's class and show aggregate school attendance totals on the idle LCD. Set RFID_DEVICE_CLASS only when the reader should be restricted to one class. Unassigned cards are added to the pending queue for registration.</p></section>""", "attendance")
+        base_url = (current_app.config.get("RFID_STATUS_URL") or "").strip() or (
+            str(current_app.config.get("PUBLIC_BASE_URL", "") or "").rstrip("/")
+            + RFID_STATUS_PATH)
+        return page("RFID Scanner Endpoint", f"""<section class="panel"><h2>Status URL configured on the server</h2><p>The ESP32 polls <code>{escape(base_url)}</code>. In <code>rfid_config.h</code> this is <code>SERVER_BASE_URL + STATUS_ENDPOINT_PATH</code>; the path has no space and no trailing slash on the base URL, e.g. <code>"http://192.168.1.182:5000"</code> + <code>"/student/rfid-status"</code>.</p><h1>RFID <span class="accent">Scanner API Endpoint</span></h1><p>Connect the RFID reader controller to <code>POST /student/rfid-login</code> with JSON such as <code>{{"uid": "A1B2C3D4"}}</code> or <code>{{"rfid_card_uid": "A1B2C3D4"}}</code>.</p><p class="muted">The server clock and saved Scan Times settings determine each result; the ESP32 sends the card UID. Scans through the configured {grace_minutes}-minute Present grace after the allowed time ends are Present. Later scans through 15 minutes after the deadline are Late. After 15 minutes, the endpoint returns Access Denied and keeps the student Absent; the configured afternoon scan window remains available. The ESP32's protected status poll, staff opening Attendance, or the scheduled attendance reconciliation command queues in-app alerts for newly absent students, guardians, and authorized staff. Late scans queue alerts immediately. Parent email and SMS alerts also require configured providers.</p><p>Configure the same RFID_DEVICE_TOKEN in the server environment and ESP32 sketch to authenticate requests. Leave RFID_DEVICE_CLASS blank to let each scanned card use its registered student's class and show aggregate school attendance totals on the idle LCD. Set RFID_DEVICE_CLASS only when the reader should be restricted to one class. Unassigned cards are added to the pending queue for registration.</p></section>""", "attendance")
 
     token_error = _rfid_device_token_error()
     if token_error:
@@ -373,6 +413,9 @@ def report_lost_card():
 
 def register_routes(app):
     app.add_url_rule('/student/rfid-login', endpoint='rfid_login', view_func=rfid_login, methods=['GET', 'POST'])
-    app.add_url_rule('/student/rfid-status', endpoint='rfid_class_status', view_func=rfid_class_status, methods=['GET'])
+    app.add_url_rule(RFID_STATUS_PATH, endpoint='rfid_class_status', view_func=rfid_class_status, methods=['GET'])
+    for index, alias in enumerate(RFID_STATUS_PATH_ALIASES):
+        app.add_url_rule(alias, endpoint='rfid_class_status_alias_%d' % index,
+                         view_func=rfid_class_status, methods=['GET'])
     app.add_url_rule('/rfid/card-lookup', endpoint='card_lookup', view_func=permission_for('card_lookup')(card_lookup), methods=['GET'])
     app.add_url_rule('/rfid/report-lost', endpoint='report_lost_card', view_func=permission_for('report_lost_card')(report_lost_card), methods=['GET', 'POST'])

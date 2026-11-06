@@ -17,7 +17,12 @@ from migrations.versions.v20261024_02_fix_official_notice_boolean_defaults impor
 from migrations.versions.v20261029_02_add_behavior_records import upgrade as upgrade_behavior_records
 from migrations.versions.v20261031_01_academic_foundation import upgrade as upgrade_academic_foundation
 from migrations.versions.v20261031_02_rfid_authoritative_foundation import upgrade as upgrade_rfid_authoritative_foundation
+<<<<<<< Updated upstream
 from migrations.versions.v20261102_01_remove_class_section import upgrade as upgrade_remove_class_section
+=======
+from migrations.versions.v20261103_01_seed_academic_modules import upgrade as upgrade_seed_academic_modules
+from migrations.versions.v20261105_01_add_module_hours_periods_weight import upgrade as upgrade_module_hours_periods_weight
+>>>>>>> Stashed changes
 
 def create_app(config_class=Config):
     app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -68,7 +73,12 @@ def create_app(config_class=Config):
             upgrade_behavior_records(connection)
             upgrade_academic_foundation(connection)
             upgrade_rfid_authoritative_foundation(connection)
+<<<<<<< Updated upstream
             upgrade_remove_class_section(connection)
+=======
+            upgrade_seed_academic_modules(connection)
+            upgrade_module_hours_periods_weight(connection)
+>>>>>>> Stashed changes
         if inspect(db.engine).has_table("user"):
             db.metadata.create_all(
                 bind=db.engine,
@@ -185,8 +195,18 @@ def create_app(config_class=Config):
                 db.session.commit()
 
     with app.app_context():
-        from migrations.versions.v20261031_01_academic_foundation import seed_and_backfill
-        seed_and_backfill()
+        if not app.config.get("SKIP_ACADEMIC_SEEDING"):
+            from migrations.versions.v20261031_01_academic_foundation import seed_and_backfill
+            seed_and_backfill()
+            from migrations.versions.v20261103_01_seed_academic_modules import seed_modules
+            seed_modules()
+
+    # The ESP32 status poll answers 503 until a device token is configured, so
+    # say so once at startup instead of only when the reader reports it.
+    if not str(app.config.get("RFID_DEVICE_TOKEN", "") or ""):
+        app.logger.warning(
+            "RFID_DEVICE_TOKEN is not set: /student/rfid-status will answer 503. "
+            "Set it in .env and restart the app.")
 
     @app.errorhandler(403)
     def forbidden(_):
